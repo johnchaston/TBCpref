@@ -1,0 +1,2623 @@
+---
+title: "Walkthrough"
+output: learnr::tutorial
+runtime: shiny_prerendered
+---
+
+
+```{r setup, include = F, warning = F, message = F}
+# usethis::create_package('~/Dropbox/Dietary Pref 2019/TBCdietPref/TBCdietPrefv2')
+
+
+rm(list=ls())
+
+library(learnr)
+library(readxl)
+library(dplyr)
+library(RCurl)
+library(httr)
+library(lme4)
+library(multcomp)
+library(ggplot2)
+library(cowplot)
+library(MAGNAMWAR)
+library(tidyr)
+library(dunn.test)
+library(rcompanion)
+library(gridExtra)
+
+ ## function to combine data from multiple files for glucose and protein analysis
+combine_files <- function(filepath1, sheet1, sheet1b, filepath2, sheet2, filepath3, sheet3) {
+	
+   # 	filepath1 = "Glucose_Protein_Values_JMC.xlsx"
+   #   sheet1 = "Plate 1 Glucose"
+   #   filepath2 = "plate1.xlsx"
+   #   sheet2 = "Plate 1 - Sheet1"
+   # 
+  glucose_file <- read_xlsx(filepath1, sheet = sheet1, col_names = c(paste0("col", rep(1:12))),range = "B2:M9") %>% 
+    gather() %>% 
+    dplyr::rename(name = value) %>% 
+    dplyr::select(name) %>% 
+    cbind(read_xlsx(filepath2, sheet = sheet2, col_names = c(paste0("col", rep(1:12))),range = "c24:n31") %>% 
+            gather() %>% 
+            dplyr::rename(OD = value) %>% 
+            dplyr::select(OD)
+          )
+  control_curve <- glucose_file %>% 
+    filter(name%in%c("0",".1",".2",".4",".7","1")) %>% 
+    mutate(name = as.numeric(as.character(name)))
+  
+  model <- lm(name ~ OD, control_curve)
+
+  glucose_samples <- glucose_file %>% 
+    filter(!is.na(name) & !name%in%c("0",".1",".2",".4",".7","1")) %>% 
+    mutate(glucose = OD * model$coefficients[2] - model$coefficients[1]) %>%
+    mutate(glucose_perfly = glucose * 5) %>%
+    separate(col = name, into = c("plate","treatment","replicate"), sep = "-", remove = F)
+  
+   # filepath1 = "Glucose_Protein_Values.xlsx"
+   # sheet1b = "Plate A Protein"
+   # filepath3 = "PlateA.xlsx"
+   # sheet3 = "Plate 1 - Sheet1"
+	protein_file <- read_xlsx(filepath1, sheet = sheet1b, col_names = c(paste0("col", rep(1:12))),range = "B2:M9") %>% 
+    gather() %>% 
+    dplyr::rename(name = value) %>% 
+    dplyr:: select(name) %>% 
+    cbind(read_xlsx(filepath3, sheet = sheet3, col_names = c(paste0("col", rep(1:12))),range = "c24:n31") %>% 
+            gather() %>% 
+            dplyr::rename(OD = value) %>% 
+            dplyr::select(OD)
+          )
+
+	model <- lm(name ~ OD, control_curve)
+
+  protein_samples <- protein_file %>% 
+    filter(!is.na(name) & !name%in%c("0","1","2","4","7","10")) %>% 
+    mutate(protein = OD * model$coefficients[2] - model$coefficients[1]) %>% 
+    mutate(protein = protein *2) %>%
+    mutate(protein_perfly = protein * 2 * 5) %>%
+  	dplyr::select(-OD)
+
+  final_samples <- glucose_samples %>% inner_join(protein_samples, by = "name")
+  
+}
+
+ ## function to calculate stats for sip duration
+calc_feeding_time_stats <- function(gh_filepath,j=3) {
+GET(gh_filepath, write_disk(tf <- tempfile(fileext = ".xls")))
+
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+abb <- read_xls(tf, sheet = "Date")
+aab <- read_xls(tf, sheet = "SipDurations")
+
+ccc <- aaa
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),sip1 = numeric(), sip2 = numeric(), dieta=character(),dietb=character())
+
+  for(i in 1:j) {
+  	lacto_pref <- (ccc[,i]/(ccc[,(j+i)]+ccc[,i]))
+  	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aab[,(i+j)],aaa[,i],aaa[,(j+i)])
+  	lp3 <- lp2[(!is.na(lp2[,c(1)]) & lp2[,c(1)]!=-1 & !is.na(lp2[,c(3)]) & lp2[,c(3)]!=-1 & !is.na(lp2[,c(4)]) & lp2[,c(4)]!=-1),]
+  	lp4 <- data.frame(lp3) %>% mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+j])), pref=lp3[,1], day=lp3[,2], time1=lp3[,3], time2 =lp3[,4],dieta=lp3[,5], dietb = lp3[,6], ) %>% dplyr::select(trt,pref,day,time = time1, sip1=dieta, sip2 = dietb, dieta=time1, dietb=time2) 
+  	out_df <- rbind(out_df,lp4)
+  }
+  
+  head(out_df)
+  pref_data <- out_df %>% 
+  	mutate(trt=gsub(pattern = " 10Y10G", replacement = "",x = trt,perl = T)) %>% 
+  	mutate(trt=gsub(pattern = " 10Y7.5G", replacement = "",x = trt,perl = T)) %>%
+  	mutate(trt=factor(trt)) %>%
+  	filter(sip1<1000 & sip2<1000) %>%
+
+  #	filter(dieta<200 & dietb<200) %>%
+    mutate(total = dieta+dietb) %>%
+  	droplevels() %>%
+    reshape2::melt(measure.vars = c("dieta", "dietb"),variable.name = "time_consuming_diet")
+  head(pref_data)
+  
+  pref_data$trt2 <- factor(pref_data$trt, labels = c("At","Ax","Lb"))
+  pref_data$trt2 <- factor(pref_data$trt2, levels = c("Ax","At","Lb"))
+  table(pref_data$trt2)
+  pref_data$tt <- with(pref_data, interaction(trt2, time_consuming_diet))
+  print(table(pref_data$tt))
+  kwtest <- kruskal.test(pref_data$value ~ pref_data$tt)
+  print(kwtest)
+
+  if (kwtest$p.value < 0.05) {
+    efg <- dunn.test(pref_data$value, pref_data$tt, method = "bh", table = F, kw=F)
+    ghi <- cldList(comparison = efg$comparisons, p.value = efg$P.adjusted, threshold = 0.05)
+    diff_codes <- as.character(unlist(ghi$Letter))
+  } else {
+    diff_codes <- c(rep("a",6))
+  }
+    
+  pd3e <- pref_data %>%
+    group_by(tt) %>%
+    summarize(mean = mean(value), sem= sd(value)/sqrt(dplyr::n())) %>%
+    ungroup()
+  colors2 <- c("gray","gray","red","red","blue","blue")
+  
+  head(pd3e)
+  
+  pd3e$abc2.x <- plyr::revalue(pd3e$tt, c("Ax.dieta" = "Ax control","At.dieta" = "At control", "Lb.dieta" = "Lb control","Ax.dietb" = "Ax trial", "At.dietb" = "At trial", "Lb.dietb" = "Lb trial"))
+  pd3e$abc2.x <- factor(pd3e$abc2.x, levels = c("Ax control","Ax trial","At control", "At trial", "Lb control", "Lb trial"))
+  
+  plot_text_size = 3
+  p25g100y <- ggplot(pd3e, aes( x=abc2.x, y = mean,fill = abc2.x)) +
+  	geom_bar(stat="identity",size=plot_text_size*1) +
+    scale_color_manual(values = colors2) +
+  	scale_fill_manual(name="Legend",values=colors2) +
+  	scale_y_continuous(limits = c(0,.3))+
+  	theme_cowplot() +
+#  	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), legend.position = "none", axis.line = element_line(size = 0.2), axis.text = element_text(angle = 45), axis.ticks = element_blank()) +
+    	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), legend.position = "none", axis.line = element_line(size = 0.2), axis.text = element_blank(), axis.ticks = element_blank()) +
+  	geom_errorbar(col = "black", aes(ymax =mean+sem, ymin = mean-sem), width=0.25, size=.25) +
+  #	geom_hline(yintercept = 0.5, linetype="dashed") +
+ 	geom_text(aes(label=c(diff_codes[c(3,1,5,4,2,6)]), y=mean + sem + .02), size=plot_text_size/2)
+  return(p25g100y)
+}
+
+
+```
+
+## Figure S1 {.tabset}
+
+### plot 100g100y
+```{r fig1100g100y, warning = F, message = F, eval = T, exercise.timelimit = 10000}
+
+GET("http://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%20100.100%20vs%20100.00%20+Date.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+abb <- read_xls(tf, sheet = "Date")
+aab <- read_xls(tf, sheet = "Date")
+ccc <- aaa
+
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+j=3
+for(i in 1:j) {
+	lacto_pref <- (ccc[,i]/(ccc[,(j+i)]+ccc[,i]))
+	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aaa[,i],aaa[,(j+i)])
+	lp3 <- lp2[(!is.na(lp2[,1]) & lp2[,1]!=-1),]
+	lp4 <- data.frame(lp3) %>% mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+j])), pref=lp3[,1], day=lp3[,2], time=lp3[,3],dieta=lp3[,4],dietb=lp3[,5]) %>% dplyr::select(trt,pref,day,dieta,dietb)
+	out_df <- rbind(out_df,lp4)
+}
+
+pref_data <- out_df %>% 
+	mutate(trt=gsub(pattern = " 10Y10G", replacement = "",x = trt,perl = T)) %>% 
+	mutate(trt=gsub(pattern = " 10Y7.5G", replacement = "",x = trt,perl = T)) %>%
+	mutate(trt=factor(trt)) %>%
+	filter(dieta<1000 & dietb<1000) %>%
+	droplevels()
+
+pd2 <- pref_data
+
+pd2$day2 <- as.factor(as.character(pd2$day))
+pd2$trt <- as.factor(as.character(pd2$trt))
+
+abc <- glmer(cbind(dieta,dietb) ~ trt + (1|day2), data=pd2, family = "binomial")
+cat("Statistics summary")
+summary(abc)
+abc1 <- glht(abc, mcp(trt='Tukey'))
+abc2 <- cld(abc1)
+pd3e <- data.frame(abc2$lp, abc2$x) %>% group_by(abc2.x) %>% dplyr::summarize(mean = mean(abc2.lp), sem=sd(abc2.lp)/sqrt(sum(abc2.lp<2)))
+colors2 <- c("gray","red","blue")
+
+pd3e$abc2.x <- plyr::revalue(pd3e$abc2.x, c("aceto 100g_aceto 100" = "At","axenic 100g_axenic 100" = "Ax","lacto 100g_lacto 100" = "Lb"))
+
+pd3e$abc2.x <- factor(pd3e$abc2.x, levels = c("Ax","At","Lb"))
+
+plot_text_size = 3
+p100g100y <- ggplot(pd3e, aes(x = abc2.x, xend=abc2.x, y=c(rep(0.5,length(table(list(abc2.x))))), yend=mean, col = abc2.x)) + 
+	geom_segment(stat="identity",size=plot_text_size*1.75) + 
+  scale_color_manual(values = colors2) +
+	scale_fill_manual(name="Legend",values=colors2) +
+	scale_y_continuous(limits = c(0,1))+
+	theme_cowplot() + 
+	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), axis.text = element_blank(), legend.position = "none", axis.ticks = element_blank(), axis.line = element_line(size = 0.2)) +
+	geom_errorbar(col = "black", ymax =pd3e$mean+pd3e$sem, ymin = pd3e$mean-pd3e$sem, width=0.25, size=.25) +
+	geom_hline(yintercept = 0.5, linetype="dashed") +
+ 	geom_text(aes(label=c("a","b","c"), y=.75), size=plot_text_size) + coord_flip()
+p100g100y
+#ggsave(h=2,w=3.5,"100G100Y.png")
+
+```
+
+### plot 75y100g
+```{r fig175y100g, exercise=T, warning = F, message = F, eval = T, exercise.timelimit = 10000}
+
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%20100g75y%20+Date.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+abb <- read_xls(tf, sheet = "Date")
+aab <- read_xls(tf, sheet = "Date")
+ccc <- aaa
+
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+j=3
+for(i in 1:j) {
+	lacto_pref <- (ccc[,i]/(ccc[,(j+i)]+ccc[,i]))
+	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aaa[,i],aaa[,(j+i)])
+	lp3 <- lp2[(!is.na(lp2[,1]) & lp2[,1]!=-1),]
+	lp4 <- data.frame(lp3) %>% mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+j])), pref=lp3[,1], day=lp3[,2], time=lp3[,3],dieta=lp3[,4],dietb=lp3[,5]) %>% dplyr::select(trt,pref,day,dieta,dietb)
+	out_df <- rbind(out_df,lp4)
+}
+
+pref_data <- out_df %>% 
+	mutate(trt=gsub(pattern = " 10Y10G", replacement = "",x = trt,perl = T)) %>% 
+	mutate(trt=gsub(pattern = " 10Y7.5G", replacement = "",x = trt,perl = T)) %>%
+	mutate(trt=factor(trt)) %>%
+	filter(dieta<1000 & dietb<1000) %>%
+	droplevels()
+
+pd2 <- pref_data
+
+pd2$day2 <- as.factor(as.character(pd2$day))
+pd2$trt <- as.factor(as.character(pd2$trt))
+
+abc <- glmer(cbind(dieta,dietb) ~ trt + (1|day2), data=pd2, family = "binomial")
+cat("Statistics summary")
+summary(abc)
+abc1 <- glht(abc, mcp(trt='Tukey'))
+abc2 <- cld(abc1)
+pd3e <- data.frame(abc2$lp, abc2$x) %>% group_by(abc2.x) %>% dplyr::summarize(mean = mean(abc2.lp), sem=sd(abc2.lp)/sqrt(sum(abc2.lp<2)))
+colors2 <- c("gray","red","blue")
+
+pd3e$abc2.x <- plyr::revalue(pd3e$abc2.x, c("aceto control_aceto trial" = "At","axenic control_axenic trial" = "ax","lacto control_lacto trial" = "Lp"))
+
+pd3e$abc2.x <- factor(pd3e$abc2.x, levels = c("ax","At","Lp"))
+
+plot_text_size = 3
+p75y100g <- ggplot(pd3e, aes(x = abc2.x, xend=abc2.x, y=c(rep(0.5,length(table(list(abc2.x))))), yend=mean, col = abc2.x)) + 
+	geom_segment(stat="identity",size=plot_text_size*1.75) + 
+  scale_color_manual(values = colors2) +
+	scale_fill_manual(name="Legend",values=colors2) +
+	scale_y_continuous(limits = c(0,1))+
+	theme_cowplot() + 
+	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), axis.text = element_blank(), legend.position = "none", axis.ticks = element_blank(), axis.line = element_line(size = 0.2)) +
+	geom_errorbar(col = "black", ymax =pd3e$mean+pd3e$sem, ymin = pd3e$mean-pd3e$sem, width=0.25, size=.25) +
+	geom_hline(yintercept = 0.5, linetype="dashed") +
+ 	geom_text(aes(label=c("b","a","a"), y=.75), size=plot_text_size) + coord_flip()
+p75y100g
+
+#ggsave(h=2,w=3.5,"75y100g.png")
+```
+
+### 50g100y
+```{r fig150g100y, exercise=T, warning = F, message = F, eval = T, exercise.timelimit = 10000}
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%2050g100y%20+Date.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+abb <- read_xls(tf, sheet = "Date")
+aab <- read_xls(tf, sheet = "Date")
+ccc <- aaa
+
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+j=3
+for(i in 1:j) {
+	lacto_pref <- (ccc[,i]/(ccc[,(j+i)]+ccc[,i]))
+	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aaa[,i],aaa[,(j+i)])
+	lp3 <- lp2[(!is.na(lp2[,1]) & lp2[,1]!=-1),]
+	lp4 <- data.frame(lp3) %>% mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+j])), pref=lp3[,1], day=lp3[,2], time=lp3[,3],dieta=lp3[,4],dietb=lp3[,5]) %>% dplyr::select(trt,pref,day,dieta,dietb)
+	out_df <- rbind(out_df,lp4)
+}
+
+pref_data <- out_df %>% 
+	mutate(trt=gsub(pattern = " 10Y10G", replacement = "",x = trt,perl = T)) %>% 
+	mutate(trt=gsub(pattern = " 10Y7.5G", replacement = "",x = trt,perl = T)) %>%
+	mutate(trt=factor(trt)) %>%
+	filter(dieta<1000 & dietb<1000) %>%
+	droplevels()
+
+pd2 <- pref_data
+
+pd2$day2 <- as.factor(as.character(pd2$day))
+pd2$trt <- as.factor(as.character(pd2$trt))
+
+abc <- glmer(cbind(dieta,dietb) ~ trt + (1|day2), data=pd2, family = "binomial")
+cat("Statistics summary")
+summary(abc)
+abc1 <- glht(abc, mcp(trt='Tukey'))
+abc2 <- cld(abc1)
+pd3e <- data.frame(abc2$lp, abc2$x) %>% group_by(abc2.x) %>% dplyr::summarize(mean = mean(abc2.lp), sem=sd(abc2.lp)/sqrt(sum(abc2.lp<2)))
+colors2 <- c("gray","red","blue")
+
+pd3e$abc2.x <- plyr::revalue(pd3e$abc2.x, c("aceto 100g_aceto 50g" = "At","axenic 100g_axenic 50g" = "Ax","lacto 100g_lacto 50g" = "Lb"))
+pd3e$abc2.x <- factor(pd3e$abc2.x, levels = c("Ax","At","Lb"))
+
+plot_text_size = 3
+p50g100y <- ggplot(pd3e, aes(x = abc2.x, xend=abc2.x, y=c(rep(0.5,length(table(list(abc2.x))))), yend=mean, col = abc2.x)) + 
+	geom_segment(stat="identity",size=plot_text_size*1.75) + 
+  scale_color_manual(values = colors2) +
+	scale_fill_manual(name="Legend",values=colors2) +
+	scale_y_continuous(limits = c(0,1))+
+	theme_cowplot() + 
+	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), axis.text = element_blank(), legend.position = "none", axis.ticks = element_blank(), axis.line = element_line(size = 0.2)) +
+	geom_errorbar(col = "black", ymax =pd3e$mean+pd3e$sem, ymin = pd3e$mean-pd3e$sem, width=0.25, size=.25) +
+	geom_hline(yintercept = 0.5, linetype="dashed") +
+ 	geom_text(aes(label=c("a","a","b"), y=.75), size=plot_text_size) + coord_flip()
+
+p50g100y
+#ggsave(h=2,w=3.5,"50G100Y.png")
+
+```
+
+### 25g100y
+```{r fig125g100y, exercise=T, warning = F, message = F, eval = T, exercise.timelimit = 10000}
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%2025g100y%20+Date.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+abb <- read_xls(tf, sheet = "Date")
+aab <- read_xls(tf, sheet = "Date")
+ccc <- aaa
+
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+j=3
+for(i in 1:j) {
+	lacto_pref <- (ccc[,i]/(ccc[,(j+i)]+ccc[,i]))
+	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aaa[,i],aaa[,(j+i)])
+	lp3 <- lp2[(!is.na(lp2[,1]) & lp2[,1]!=-1),]
+	lp4 <- data.frame(lp3) %>% mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+j])), pref=lp3[,1], day=lp3[,2], time=lp3[,3],dieta=lp3[,4],dietb=lp3[,5]) %>% dplyr::select(trt,pref,day,dieta,dietb)
+	out_df <- rbind(out_df,lp4)
+}
+
+pref_data <- out_df %>% 
+	mutate(trt=gsub(pattern = " 10Y10G", replacement = "",x = trt,perl = T)) %>% 
+	mutate(trt=gsub(pattern = " 10Y7.5G", replacement = "",x = trt,perl = T)) %>%
+	mutate(trt=factor(trt)) %>%
+	filter(dieta<1000 & dietb<1000) %>%
+	droplevels()
+
+pd2 <- pref_data
+
+pd2$day2 <- as.factor(as.character(pd2$day))
+pd2$trt <- as.factor(as.character(pd2$trt))
+
+abc <- glmer(cbind(dieta,dietb) ~ trt + (1|day2), data=pd2, family = "binomial")
+cat("Statistics summary")
+summary(abc)
+abc1 <- glht(abc, mcp(trt='Tukey'))
+abc2 <- cld(abc1)
+pd3e <- data.frame(abc2$lp, abc2$x) %>% group_by(abc2.x) %>% dplyr::summarize(mean = mean(abc2.lp), sem=sd(abc2.lp)/sqrt(sum(abc2.lp<2)))
+colors2 <- c("gray","red","blue")
+
+pd3e$abc2.x <- plyr::revalue(pd3e$abc2.x, c("aceto 100g_aceto 25g" = "At","axenic 100g_axenic 25g" = "Ax","lacto 100g_lacto 25g" = "Lb"))
+pd3e$abc2.x <- factor(pd3e$abc2.x, levels = c("Ax","At","Lb"))
+
+plot_text_size = 3
+p25g100y <- ggplot(pd3e, aes(x = abc2.x, xend=abc2.x, y=c(rep(0.5,length(table(list(abc2.x))))), yend=mean, col = abc2.x)) + 
+	geom_segment(stat="identity",size=plot_text_size*1.75) + 
+  scale_color_manual(values = colors2) +
+	scale_fill_manual(name="Legend",values=colors2) +
+	scale_y_continuous(limits = c(0,1))+
+	theme_cowplot() + 
+	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), axis.text = element_blank(), legend.position = "none", axis.ticks = element_blank(), axis.line = element_line(size = 0.2)) +
+	geom_errorbar(col = "black", ymax =pd3e$mean+pd3e$sem, ymin = pd3e$mean-pd3e$sem, width=0.25, size=.25) +
+	geom_hline(yintercept = 0.5, linetype="dashed") +
+ 	geom_text(aes(label=c("a","a","b"), y=.85), size=plot_text_size) + coord_flip()
+p25g100y
+#ggsave(h=2,w=3.5,"25G100Y.png")
+```
+
+### 75g100y
+```{r fig175g100y, exercise=T, warning = F, message = F, eval = T, exercise.timelimit = 10000}
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%2075g100y%20+Date.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+abb <- read_xls(tf, sheet = "Date")
+aab <- read_xls(tf, sheet = "Date")
+ccc <- aaa
+
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+j=3
+for(i in 1:j) {
+	lacto_pref <- (ccc[,i]/(ccc[,(j+i)]+ccc[,i]))
+	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aaa[,i],aaa[,(j+i)])
+	lp3 <- lp2[(!is.na(lp2[,1]) & lp2[,1]!=-1),]
+	lp4 <- data.frame(lp3) %>% mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+j])), pref=lp3[,1], day=lp3[,2], time=lp3[,3],dieta=lp3[,4],dietb=lp3[,5]) %>% dplyr::select(trt,pref,day,dieta,dietb)
+	out_df <- rbind(out_df,lp4)
+}
+
+pref_data <- out_df %>% 
+	mutate(trt=gsub(pattern = " 10Y10G", replacement = "",x = trt,perl = T)) %>% 
+	mutate(trt=gsub(pattern = " 10Y7.5G", replacement = "",x = trt,perl = T)) %>%
+	mutate(trt=factor(trt)) %>%
+	filter(dieta<1000 & dietb<1000) %>%
+	droplevels()
+
+pd2 <- pref_data
+
+pd2$day2 <- as.factor(as.character(pd2$day))
+pd2$trt <- as.factor(as.character(pd2$trt))
+
+abc <- glmer(cbind(dieta,dietb) ~ trt + (1|day2), data=pd2, family = "binomial")
+cat("Statistics summary")
+summary(abc)
+abc1 <- glht(abc, mcp(trt='Tukey'))
+abc2 <- cld(abc1)
+pd3e <- data.frame(abc2$lp, abc2$x) %>% group_by(abc2.x) %>% dplyr::summarize(mean = mean(abc2.lp), sem=sd(abc2.lp)/sqrt(sum(abc2.lp<2)))
+colors2 <- c("gray","red","blue")
+
+pd3e$abc2.x <- plyr::revalue(pd3e$abc2.x, c("aceto 100g_aceto 100" = "At","axenic 100g_axenic 100" = "Ax","lacto 100g_lacto 100" = "Lb"))
+pd3e$abc2.x <- factor(pd3e$abc2.x, levels = c("Ax","At","Lb"))
+
+plot_text_size = 3
+p100y75g <- ggplot(pd3e, aes(x = abc2.x, xend=abc2.x, y=c(rep(0.5,length(table(list(abc2.x))))), yend=mean, col = abc2.x)) + 
+	geom_segment(stat="identity",size=plot_text_size*1.75) + 
+  scale_color_manual(values = colors2) +
+	scale_fill_manual(name="Legend",values=colors2) +
+	scale_y_continuous(limits = c(0,1))+
+	theme_cowplot() + 
+	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), axis.text = element_blank(), legend.position = "none", axis.ticks = element_blank(), axis.line = element_line(size = 0.2)) +
+	geom_errorbar(col = "black", ymax =pd3e$mean+pd3e$sem, ymin = pd3e$mean-pd3e$sem, width=0.25, size=.25) +
+	geom_hline(yintercept = 0.5, linetype="dashed") +
+ 	geom_text(aes(label=c("b","a","b"), y=.75), size=plot_text_size) + coord_flip()
+p100y75g
+
+#ggsave(h=2,w=3.5,"100y75g.png")
+```
+
+### 100g50y
+```{r fig1100g50y, exercise=T, warning = F, message = F, eval = T, exercise.timelimit = 10000}
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%20100g50y%20+Data.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+abb <- read_xls(tf, sheet = "Date")
+aab <- read_xls(tf, sheet = "Date")
+ccc <- aaa
+
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+j=3
+for(i in 1:j) {
+	lacto_pref <- (ccc[,i]/(ccc[,(j+i)]+ccc[,i]))
+	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aaa[,i],aaa[,(j+i)])
+	lp3 <- lp2[(!is.na(lp2[,1]) & lp2[,1]!=-1),]
+	lp4 <- data.frame(lp3) %>% mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+j])), pref=lp3[,1], day=lp3[,2], time=lp3[,3],dieta=lp3[,4],dietb=lp3[,5]) %>% dplyr::select(trt,pref,day,dieta,dietb)
+	out_df <- rbind(out_df,lp4)
+}
+
+pref_data <- out_df %>% 
+	mutate(trt=gsub(pattern = " 10Y10G", replacement = "",x = trt,perl = T)) %>% 
+	mutate(trt=gsub(pattern = " 10Y7.5G", replacement = "",x = trt,perl = T)) %>%
+	mutate(trt=factor(trt)) %>%
+	filter(dieta<1000 & dietb<1000) %>%
+	droplevels()
+
+pd2 <- pref_data
+
+pd2$day2 <- as.factor(as.character(pd2$day))
+pd2$trt <- as.factor(as.character(pd2$trt))
+
+abc <- glmer(cbind(dieta,dietb) ~ trt + (1|day2), data=pd2, family = "binomial")
+cat("Statistics summary")
+summary(abc)
+abc1 <- glht(abc, mcp(trt='Tukey'))
+abc2 <- cld(abc1)
+pd3e <- data.frame(abc2$lp, abc2$x) %>% group_by(abc2.x) %>% dplyr::summarize(mean = mean(abc2.lp), sem=sd(abc2.lp)/sqrt(sum(abc2.lp<2)))
+colors2 <- c("gray","red","blue")
+
+pd3e$abc2.x <- plyr::revalue(pd3e$abc2.x, c("aceto control_aceto trial" = "At","axenic control_axenic trial" = "Ax","lacto control_lacto trial" = "Lb"))
+
+pd3e$abc2.x <- factor(pd3e$abc2.x, levels = c("Ax","At","Lb"))
+
+plot_text_size = 3
+p100g50y <- ggplot(pd3e, aes(x = abc2.x, xend=abc2.x, y=c(rep(0.5,length(table(list(abc2.x))))), yend=mean, col = abc2.x)) + 
+	geom_segment(stat="identity",size=plot_text_size*1.75) + 
+  scale_color_manual(values = colors2) +
+	scale_fill_manual(name="Legend",values=colors2) +
+	scale_y_continuous(limits = c(0,1))+
+	theme_cowplot() + 
+	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), axis.text = element_blank(), legend.position = "none", axis.ticks = element_blank(), axis.line = element_line(size = 0.2)) +
+	geom_errorbar(col = "black", ymax =pd3e$mean+pd3e$sem, ymin = pd3e$mean-pd3e$sem, width=0.25, size=.25) +
+	geom_hline(yintercept = 0.5, linetype="dashed") +
+ 	geom_text(aes(label=c("b","a","c"), y=.75), size=plot_text_size) + coord_flip()
+
+p100g50y
+#ggsave(h=2,w=3.5,"100G50Y.png")
+```
+
+### 100g25y
+```{r fig1100g25y, exercise=T, warning = F, message = F, eval = T, exercise.timelimit = 10000}
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%20100g25y%20+Date.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+abb <- read_xls(tf, sheet = "Date")
+aab <- read_xls(tf, sheet = "Date")
+ccc <- aaa
+
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+j=3
+for(i in 1:j) {
+	lacto_pref <- (ccc[,i]/(ccc[,(j+i)]+ccc[,i]))
+	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aaa[,i],aaa[,(j+i)])
+	lp3 <- lp2[(!is.na(lp2[,1]) & lp2[,1]!=-1),]
+	lp4 <- data.frame(lp3) %>% mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+j])), pref=lp3[,1], day=lp3[,2], time=lp3[,3],dieta=lp3[,4],dietb=lp3[,5]) %>% dplyr::select(trt,pref,day,dieta,dietb)
+	out_df <- rbind(out_df,lp4)
+}
+
+pref_data <- out_df %>% 
+	mutate(trt=gsub(pattern = " 10Y10G", replacement = "",x = trt,perl = T)) %>% 
+	mutate(trt=gsub(pattern = " 10Y7.5G", replacement = "",x = trt,perl = T)) %>%
+	mutate(trt=factor(trt)) %>%
+	filter(dieta<1000 & dietb<1000) %>%
+	droplevels()
+
+pd2 <- pref_data
+
+pd2$day2 <- as.factor(as.character(pd2$day))
+pd2$trt <- as.factor(as.character(pd2$trt))
+
+abc <- glmer(cbind(dieta,dietb) ~ trt + (1|day2), data=pd2, family = "binomial")
+cat("Statistics summary")
+summary(abc)
+abc1 <- glht(abc, mcp(trt='Tukey'))
+abc2 <- cld(abc1)
+pd3e <- data.frame(abc2$lp, abc2$x) %>% group_by(abc2.x) %>% dplyr::summarize(mean = mean(abc2.lp), sem=sd(abc2.lp)/sqrt(sum(abc2.lp<2)))
+colors2 <- c("gray","red","blue")
+
+pd3e$abc2.x <- plyr::revalue(pd3e$abc2.x, c("aceto yeast100_aceto yeast25" = "At","axenic yeast100_axenic yeast25" = "Ax","lacto yeast100_lacto yeast25" = "Lb"))
+
+pd3e$abc2.x <- factor(pd3e$abc2.x, levels = c("Ax","At","Lb"))
+
+plot_text_size = 3
+p100g25y <- ggplot(pd3e, aes(x = abc2.x, xend=abc2.x, y=c(rep(0.5,length(table(list(abc2.x))))), yend=mean, col = abc2.x)) + 
+	geom_segment(stat="identity",size=plot_text_size*1.75) + 
+  scale_color_manual(values = colors2) +
+	scale_fill_manual(name="Legend",values=colors2) +
+	scale_y_continuous(limits = c(0,1))+
+	theme_cowplot() + 
+	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), axis.text = element_blank(), legend.position = "none", axis.ticks = element_blank(), axis.line = element_line(size = 0.2)) +
+	geom_errorbar(col = "black", ymax =pd3e$mean+pd3e$sem, ymin = pd3e$mean-pd3e$sem, width=0.25, size=.25) +
+	geom_hline(yintercept = 0.5, linetype="dashed") +
+ 	geom_text(aes(label=c("a","b","c"), y=.75), size=plot_text_size) + coord_flip()
+
+p100g25y
+#ggsave(h=2,w=3.5,"100G25Y.png")
+
+```
+
+### 50g50y
+```{r fig150g50y, exercise=T, warning = F, message = F, eval = T, exercise.timelimit = 10000}
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%20100g100y%20vs%2050g50y%20+Date_JMC.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+abb <- read_xls(tf, sheet = "Date")
+aab <- read_xls(tf, sheet = "Date")
+ccc <- aaa
+
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+j=3
+for(i in 1:j) {
+	lacto_pref <- (ccc[,i]/(ccc[,(j+i)]+ccc[,i]))
+	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aaa[,i],aaa[,(j+i)])
+	lp3 <- lp2[(!is.na(lp2[,1]) & lp2[,1]!=-1),]
+	lp4 <- data.frame(lp3) %>% mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+j])), pref=lp3[,1], day=lp3[,2], time=lp3[,3],dieta=lp3[,4],dietb=lp3[,5]) %>% dplyr::select(trt,pref,day,dieta,dietb)
+	out_df <- rbind(out_df,lp4)
+}
+
+pref_data <- out_df %>% 
+	mutate(trt=gsub(pattern = " 10Y10G", replacement = "",x = trt,perl = T)) %>% 
+	mutate(trt=gsub(pattern = " 10Y7.5G", replacement = "",x = trt,perl = T)) %>%
+	mutate(trt=factor(trt)) %>%
+	filter(dieta<1000 & dietb<1000) %>%
+	droplevels()
+
+pd2 <- pref_data
+
+pd2$day2 <- as.factor(as.character(pd2$day))
+pd2$trt <- as.factor(as.character(pd2$trt))
+
+abc <- glmer(cbind(dieta,dietb) ~ trt + (1|day2), data=pd2, family = "binomial")
+cat("Statistics summary")
+summary(abc)
+abc1 <- glht(abc, mcp(trt='Tukey'))
+abc2 <- cld(abc1)
+pd3e <- data.frame(abc2$lp, abc2$x) %>% group_by(abc2.x) %>% dplyr::summarize(mean = mean(abc2.lp), sem=sd(abc2.lp)/sqrt(sum(abc2.lp<2)))
+colors2 <- c("gray","red","blue")
+
+pd3e$abc2.x <- plyr::revalue(pd3e$abc2.x, c("aceto ratio100_aceto ratio50" = "At","axenic ratio100_axenic ratio50" = "Ax","lacto ratio100_lacto ratio50" = "Lb"))
+pd3e$abc2.x <- factor(pd3e$abc2.x, levels = c("Ax","At","Lb"))
+
+plot_text_size = 3
+p50g50y <- ggplot(pd3e, aes(x = abc2.x, xend=abc2.x, y=c(rep(0.5,length(table(list(abc2.x))))), yend=mean, col = abc2.x)) + 
+	geom_segment(stat="identity",size=plot_text_size*1.75) + 
+  scale_color_manual(values = colors2) +
+	scale_fill_manual(name="Legend",values=colors2) +
+	scale_y_continuous(limits = c(0,1))+
+	theme_cowplot() + 
+#	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), axis.text.x = element_text(angle = 45, hjust=1), legend.position = "none") +
+	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), axis.text = element_blank(), legend.position = "none", axis.ticks = element_blank(), axis.line = element_line(size = 0.2)) +
+	geom_errorbar(col = "black", ymax =pd3e$mean+pd3e$sem, ymin = pd3e$mean-pd3e$sem, width=0.25, size=.25) +
+#	labs(x="treatment",y = "Preference index") + 
+#  annotate(geom="text", x= 1, y= 0.0, label = "10%Y 10%G",color="black", size=4, hjust = 0, fill="white", label.size=0, angle = 90) +
+#  annotate(geom="text", x= 1, y= 1, label = "10%Y 10%G",color="black", size=4, hjust = 0, fill="white", label.size=0, angle = 90) + 
+	geom_hline(yintercept = 0.5, linetype="dashed") +
+ 	geom_text(aes(label=c("b","a","a"), y=.75), size=plot_text_size) + coord_flip()
+
+p50g50y
+#ggsave(h=2,w=3.5,"50G50Y.png")
+```
+
+### 50g25y
+```{r fig150g25y, exercise=T, warning = F, message = F, eval = T, exercise.timelimit = 10000}
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%20100.100%20to%2050.25+Date_JMC.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+abb <- read_xls(tf, sheet = "Date")
+aab <- read_xls(tf, sheet = "Date")
+ccc <- aaa
+
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+j=3
+for(i in 1:j) {
+	lacto_pref <- (ccc[,i]/(ccc[,(j+i)]+ccc[,i]))
+	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aaa[,i],aaa[,(j+i)])
+	lp3 <- lp2[(!is.na(lp2[,1]) & lp2[,1]!=-1),]
+	lp4 <- data.frame(lp3) %>% mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+j])), pref=lp3[,1], day=lp3[,2], time=lp3[,3],dieta=lp3[,4],dietb=lp3[,5]) %>% dplyr::select(trt,pref,day,dieta,dietb)
+	out_df <- rbind(out_df,lp4)
+}
+
+pref_data <- out_df %>% 
+	mutate(trt=gsub(pattern = " 10Y10G", replacement = "",x = trt,perl = T)) %>% 
+	mutate(trt=gsub(pattern = " 10Y7.5G", replacement = "",x = trt,perl = T)) %>%
+	mutate(trt=factor(trt)) %>%
+	filter(dieta<1000 & dietb<1000) %>%
+	droplevels()
+
+pd2 <- pref_data
+pd2$day2 <- as.factor(as.character(pd2$day))
+pd2$trt <- as.factor(as.character(pd2$trt))
+
+abc <- glmer(cbind(dieta,dietb) ~ trt + (1|day2), data=pd2, family = "binomial")
+cat("Statistics summary")
+summary(abc)
+abc1 <- glht(abc, mcp(trt='Tukey'))
+abc2 <- cld(abc1)
+pd3e <- data.frame(abc2$lp, abc2$x) %>% group_by(abc2.x) %>% dplyr::summarize(mean = mean(abc2.lp), sem=sd(abc2.lp)/sqrt(sum(abc2.lp<2)))
+colors2 <- c("gray","red","blue")
+
+pd3e$abc2.x <- plyr::revalue(pd3e$abc2.x, c("aceto 100to100_aceto 50to25" = "At","axenic 100to100_axenic 50to25" = "Ax","lacto 100to100_lacto 50to25" = "Lb"))
+pd3e$abc2.x <- factor(pd3e$abc2.x, levels = c("Ax","At","Lb"))
+
+plot_text_size = 3
+p50g25y <- ggplot(pd3e, aes(x = abc2.x, xend=abc2.x, y=c(rep(0.5,length(table(list(abc2.x))))), yend=mean, col = abc2.x)) + 
+	geom_segment(stat="identity",size=plot_text_size*1.75) + 
+  scale_color_manual(values = colors2) +
+	scale_fill_manual(name="Legend",values=colors2) +
+	scale_y_continuous(limits = c(0,1))+
+	theme_cowplot() + 
+	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), axis.text = element_blank(), legend.position = "none", axis.ticks = element_blank(), axis.line = element_line(size = 0.2)) +
+	geom_errorbar(col = "black", ymax =pd3e$mean+pd3e$sem, ymin = pd3e$mean-pd3e$sem, width=0.25, size=.25) +
+	geom_hline(yintercept = 0.5, linetype="dashed") +
+ 	geom_text(aes(label=c("a","b","c"), y=.75), size=plot_text_size) + coord_flip()
+
+p50g25y
+#ggsave(h=2,w=3.5,"50G25Y.png")
+
+```
+
+### Build the plot
+```{r fig1plot, exercise=F, warning = F, message = F, eval = F, exercise.timelimit = 10000}
+
+pyaxis <- ggplot(pd3e, aes(x = abc2.x, xend=abc2.x, y=c(rep(0.5,length(table(list(abc2.x))))), yend=mean, col = abc2.x)) + 
+  geom_blank() + 
+  theme_cowplot() + 
+  ylim(c(0,1)) + 
+  coord_flip()+
+  theme(axis.title = element_blank(), axis.line.x =element_blank(), axis.ticks.x=element_blank(), axis.text.x= element_blank(),axis.ticks.y = element_line(size = 0.2), axis.line.y = element_line(size = 0.2), axis.text.y = element_text(size = 6))
+
+pxaxis <- ggplot(pd3e, aes(x = abc2.x, xend=abc2.x, y=c(rep(0.5,length(table(list(abc2.x))))), yend=mean, col = abc2.x)) + 
+  geom_blank() + 
+  theme_cowplot() + 
+  ylim(c(0,1)) + 
+  coord_flip()+
+  theme(axis.title = element_blank(), axis.line.y =element_blank(), axis.ticks.y=element_blank(), axis.text.y= element_blank(),axis.ticks.x = element_line(size = 0.2), axis.line.x = element_line(size = 0.2), axis.text.x = element_text(angle = 45, hjust = 1, size = 6))
+
+label_size = 4
+l100g <- ggplot() + theme_void() + geom_text(aes(0,0,label = "100g"), size = label_size)
+l75g <- ggplot() + theme_void() + geom_text(aes(0,0,label = "75g"), size = label_size)
+l50g <- ggplot() + theme_void() + geom_text(aes(0,0,label = "50g"), size = label_size)
+l25g <- ggplot() + theme_void() + geom_text(aes(0,0,label = "25g"), size = label_size)
+l100y <- ggplot() + theme_void() + geom_text(aes(0,0,label = "100g"), size = label_size)
+l75y <- ggplot() + theme_void() + geom_text(aes(0,0,label = "75g"), size = label_size)
+l50y <- ggplot() + theme_void() + geom_text(aes(0,0,label = "50g"), size = label_size)
+l25y <- ggplot() + theme_void() + geom_text(aes(0,0,label = "25g"), size = label_size)
+ly <- ggplot() + theme_void() + geom_text(aes(0,0,label = "Yeast"), size = label_size*1.25, angle = 90)
+lg <- ggplot() + theme_void() + geom_text(aes(0,0,label = "Glucose"), size = label_size*1.25)
+ltrt <- ggplot() + theme_void() + geom_text(aes(0,0,label = "Bacterial treatment"), size = label_size*.75, angle = 90)
+lfp <- ggplot() + theme_void() + geom_text(aes(0,0,label = "Preference index"), size = label_size*.75)
+lcontrol <- ggplot() + theme_void() + geom_text(aes(0,0,label = "prefers control diet"), size = label_size*.75, angle = 90, color = "green")
+ltrial <- ggplot() + theme_void() + geom_text(aes(0,0,label = "prefers trial diet"), size = label_size*.75, angle = 90, color = "green")
+
+jpeg(h=4.5, w=6, "plot_all_2021-01-14.jpg", units = "in", res = 300)
+  grid.arrange(	
+		l25g, l50g, l75g, l100g, ## 1,2,3,4
+		l25y,p50g25y,p100g25y,
+		l50y,p50g50y,p100g50y,
+		l75y,p75y100g,
+		l100y,p25g100y,p50g100y,p100y75g,p100g100y,
+		pxaxis,pyaxis,pxaxis,pyaxis,pxaxis,pyaxis,pxaxis,pyaxis, ## 20-25
+		lg, ly, ltrt, lfp, ## 26, 27, 28, 29
+		lcontrol,ltrial,
+		widths = c(.3,.4,.2,.2,.2,1,1,1,1,.2),	
+		heights = c(.3,.4,1,1,1,1,.3,.2),	
+		layout_matrix=rbind(	
+		  c(NA,NA,NA,NA,NA,26,26,26,26,NA),
+			c(NA,NA,NA,NA,NA,1, 2, 3, 4, NA),		
+			c(27,5, 28,19,31,NA,6, NA,7, 30),
+			c(27,8, 28,21,31,NA,9, NA,10,30),
+			c(27,11,28,23,31,NA,NA,NA,12,30),
+			c(27,13,28,25,31,14,15,16,17,30),
+			c(NA,NA,NA,NA,NA,18,20,22,24,NA),
+			c(NA,NA,NA,NA,NA,29,29,29,29,NA)
+			)
+		)
+dev.off()
+
+```
+
+## Figure S2A total sips ok {.tabset}
+
+### plot 100g100y
+```{r fig1100g100y2, warning = F, message = F, eval = T, exercise.timelimit = 10000}
+
+GET("http://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%20100.100%20vs%20100.00%20+Date.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+abb <- read_xls(tf, sheet = "Date")
+aab <- read_xls(tf, sheet = "Date")
+ccc <- aaa
+
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+j=3
+for(i in 1:j) {
+	lacto_pref <- (ccc[,i]/(ccc[,(j+i)]+ccc[,i]))
+	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aaa[,i],aaa[,(j+i)])
+	lp3 <- lp2[(!is.na(lp2[,1]) & lp2[,1]!=-1),]
+	lp4 <- data.frame(lp3) %>% mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+j])), pref=lp3[,1], day=lp3[,2], time=lp3[,3],dieta=lp3[,4],dietb=lp3[,5]) %>% dplyr::select(trt,pref,day,dieta,dietb)
+	out_df <- rbind(out_df,lp4)
+}
+
+pref_data <- out_df %>% 
+	mutate(trt=gsub(pattern = " 10Y10G", replacement = "",x = trt,perl = T)) %>% 
+	mutate(trt=gsub(pattern = " 10Y7.5G", replacement = "",x = trt,perl = T)) %>%
+	mutate(trt=factor(trt)) %>%
+	filter(dieta<1000 & dietb<1000) %>%
+  mutate(total = dieta+dietb) %>%
+	droplevels()
+
+pd2 <- pref_data
+
+cat("KW test result")
+kruskal.test(pd2$total ~ pd2$trt)
+efg <- dunn.test(pd2$total, pd2$trt, method = "bh", table = F, kw=F)
+
+cat("N per group")
+table(pd2$trt)
+
+pd3e <- pd2 %>%
+  group_by(trt) %>%
+  summarize(mean = mean(total), sem= sd(total)/sqrt(dplyr::n())) %>%
+  ungroup()
+
+pd3e$abc2.x <- plyr::revalue(pd3e$trt, c("aceto 100g_aceto 100" = "At","axenic 100g_axenic 100" = "Ax","lacto 100g_lacto 100" = "Lb"))
+
+pd3e$abc2.x <- factor(pd3e$abc2.x, levels = c("Ax","At","Lb"))
+
+plot_text_size = 3
+p100g100y <- ggplot(pd3e, aes( x=abc2.x, y = mean,fill = abc2.x)) +
+	geom_bar(stat="identity",size=plot_text_size*1) +
+  scale_color_manual(values = colors2) +
+	scale_fill_manual(name="Legend",values=colors2) +
+	scale_y_continuous(limits = c(0,750))+
+	theme_cowplot() +
+	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), legend.position = "none", axis.line = element_line(size = 0.2), axis.text = element_blank(), axis.ticks = element_blank()) +
+	geom_errorbar(col = "black", aes(ymax =mean+sem, ymin = mean-sem), width=0.25, size=.25) +
+#	geom_hline(yintercept = 0.5, linetype="dashed") +
+ 	geom_text(aes(label=c("a","a","a"), y=mean + sem + 80), size=plot_text_size)
+p100g100y
+#ggsave(h=2,w=3.5,"100G100Y.png")
+
+```
+
+### plot 75y100g
+```{r fig175y100g2, exercise=T, warning = F, message = F, eval = T, exercise.timelimit = 10000}
+
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%20100g75y%20+Date.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+abb <- read_xls(tf, sheet = "Date")
+aab <- read_xls(tf, sheet = "Date")
+ccc <- aaa
+
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+j=3
+for(i in 1:j) {
+	lacto_pref <- (ccc[,i]/(ccc[,(j+i)]+ccc[,i]))
+	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aaa[,i],aaa[,(j+i)])
+	lp3 <- lp2[(!is.na(lp2[,1]) & lp2[,1]!=-1),]
+	lp4 <- data.frame(lp3) %>% mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+j])), pref=lp3[,1], day=lp3[,2], time=lp3[,3],dieta=lp3[,4],dietb=lp3[,5]) %>% dplyr::select(trt,pref,day,dieta,dietb)
+	out_df <- rbind(out_df,lp4)
+}
+
+pref_data <- out_df %>% 
+	mutate(trt=gsub(pattern = " 10Y10G", replacement = "",x = trt,perl = T)) %>% 
+	mutate(trt=gsub(pattern = " 10Y7.5G", replacement = "",x = trt,perl = T)) %>%
+	mutate(trt=factor(trt)) %>%
+	filter(dieta<1000 & dietb<1000) %>%
+  mutate(total = dieta+dietb) %>%
+	droplevels()
+
+pd2 <- pref_data
+
+pd2$day2 <- as.factor(as.character(pd2$day))
+pd2$trt <- as.factor(as.character(pd2$trt))
+
+cat("KW test result")
+kruskal.test(pd2$total ~ pd2$trt)
+efg <- dunn.test(pd2$total, pd2$trt, method = "bh", table = F, kw=F)
+
+cat("N per group")
+table(pd2$trt)
+
+pd3e <- pd2 %>%
+  group_by(trt) %>%
+  summarize(mean = mean(total), sem= sd(total)/sqrt(dplyr::n())) %>%
+  ungroup()
+
+pd3e$abc2.x <- plyr::revalue(pd3e$trt, c("aceto control_aceto trial" = "At","axenic control_axenic trial" = "Ax","lacto control_lacto trial" = "Lb"))
+
+pd3e$abc2.x <- factor(pd3e$abc2.x, levels = c("Ax","At","Lb"))
+
+plot_text_size = 3
+p75y100g <- ggplot(pd3e, aes( x=abc2.x, y = mean,fill = abc2.x)) +
+	geom_bar(stat="identity",size=plot_text_size*1) +
+  scale_color_manual(values = colors2) +
+	scale_fill_manual(name="Legend",values=colors2) +
+	scale_y_continuous(limits = c(0,750))+
+	theme_cowplot() +
+	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), legend.position = "none", axis.line = element_line(size = 0.2), axis.text = element_blank(), axis.ticks = element_blank()) +
+	geom_errorbar(col = "black", aes(ymax =mean+sem, ymin = mean-sem), width=0.25, size=.25) +
+#	geom_hline(yintercept = 0.5, linetype="dashed") +
+ 	geom_text(aes(label=c("a","a","a"), y=mean + sem + 80), size=plot_text_size)
+
+p75y100g
+#ggsave(h=2,w=3.5,"75y100g.png")
+```
+
+### 50g100y
+```{r fig150g100y2, exercise=T, warning = F, message = F, eval = T, exercise.timelimit = 10000}
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%2050g100y%20+Date.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+abb <- read_xls(tf, sheet = "Date")
+aab <- read_xls(tf, sheet = "Date")
+ccc <- aaa
+
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+j=3
+for(i in 1:j) {
+	lacto_pref <- (ccc[,i]/(ccc[,(j+i)]+ccc[,i]))
+	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aaa[,i],aaa[,(j+i)])
+	lp3 <- lp2[(!is.na(lp2[,1]) & lp2[,1]!=-1),]
+	lp4 <- data.frame(lp3) %>% mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+j])), pref=lp3[,1], day=lp3[,2], time=lp3[,3],dieta=lp3[,4],dietb=lp3[,5]) %>% dplyr::select(trt,pref,day,dieta,dietb)
+	out_df <- rbind(out_df,lp4)
+}
+
+pref_data <- out_df %>% 
+	mutate(trt=gsub(pattern = " 10Y10G", replacement = "",x = trt,perl = T)) %>% 
+	mutate(trt=gsub(pattern = " 10Y7.5G", replacement = "",x = trt,perl = T)) %>%
+	mutate(trt=factor(trt)) %>%
+	filter(dieta<1000 & dietb<1000) %>%
+  mutate(total = dieta+dietb) %>%
+	droplevels()
+
+pd2 <- pref_data
+
+pd2$day2 <- as.factor(as.character(pd2$day))
+pd2$trt <- as.factor(as.character(pd2$trt))
+
+cat("KW test result")
+kruskal.test(pd2$total ~ pd2$trt)
+efg <- dunn.test(pd2$total, pd2$trt, method = "bh", table = F, kw=F)
+ghi <- cldList(comparison = efg$comparisons, p.value = efg$P.adjusted, threshold = 0.05)
+cat("compact letter displays")
+ghi
+
+cat("N per group")
+table(pd2$trt)
+
+pd3e <- pd2 %>%
+  group_by(trt) %>%
+  summarize(mean = mean(total), sem= sd(total)/sqrt(dplyr::n())) %>%
+  ungroup()
+
+pd3e$abc2.x <- plyr::revalue(pd3e$trt, c("aceto 100g_aceto 50g" = "At","axenic 100g_axenic 50g" = "Ax","lacto 100g_lacto 50g" = "Lb"))
+
+pd3e$abc2.x <- factor(pd3e$abc2.x, levels = c("Ax","At","Lb"))
+
+plot_text_size = 3
+p50g100y <- ggplot(pd3e, aes( x=abc2.x, y = mean,fill = abc2.x)) +
+	geom_bar(stat="identity",size=plot_text_size*1) +
+  scale_color_manual(values = colors2) +
+	scale_fill_manual(name="Legend",values=colors2) +
+	scale_y_continuous(limits = c(0,750))+
+	theme_cowplot() +
+	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), legend.position = "none", axis.line = element_line(size = 0.2), axis.text = element_blank(), axis.ticks = element_blank()) +
+	geom_errorbar(col = "black", aes(ymax =mean+sem, ymin = mean-sem), width=0.25, size=.25) +
+#	geom_hline(yintercept = 0.5, linetype="dashed") +
+ 	geom_text(aes(label=c("a","b","ab"), y=mean + sem + 80), size=plot_text_size)
+
+p50g100y
+#ggsave(h=2,w=3.5,"50G100Y.png")
+
+```
+
+### 25g100y
+```{r fig125g100y2, exercise=T, warning = F, message = F, eval = T, exercise.timelimit = 10000}
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%2025g100y%20+Date.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+abb <- read_xls(tf, sheet = "Date")
+aab <- read_xls(tf, sheet = "Date")
+ccc <- aaa
+
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+j=3
+for(i in 1:j) {
+	lacto_pref <- (ccc[,i]/(ccc[,(j+i)]+ccc[,i]))
+	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aaa[,i],aaa[,(j+i)])
+	lp3 <- lp2[(!is.na(lp2[,1]) & lp2[,1]!=-1),]
+	lp4 <- data.frame(lp3) %>% mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+j])), pref=lp3[,1], day=lp3[,2], time=lp3[,3],dieta=lp3[,4],dietb=lp3[,5]) %>% dplyr::select(trt,pref,day,dieta,dietb)
+	out_df <- rbind(out_df,lp4)
+}
+
+pref_data <- out_df %>% 
+	mutate(trt=gsub(pattern = " 10Y10G", replacement = "",x = trt,perl = T)) %>% 
+	mutate(trt=gsub(pattern = " 10Y7.5G", replacement = "",x = trt,perl = T)) %>%
+	mutate(trt=factor(trt)) %>%
+	filter(dieta<1000 & dietb<1000) %>%
+  mutate(total = dieta+dietb) %>%
+	droplevels()
+
+pd2 <- pref_data
+
+pd2$day2 <- as.factor(as.character(pd2$day))
+pd2$trt <- as.factor(as.character(pd2$trt))
+
+cat("KW test result")
+kruskal.test(pd2$total ~ pd2$trt)
+efg <- dunn.test(pd2$total, pd2$trt, method = "bh", table = F, kw=F)
+ghi <- cldList(comparison = efg$comparisons, p.value = efg$P.adjusted, threshold = 0.05)
+cat("compact letter displays")
+ghi
+
+cat("N per group")
+table(pd2$trt)
+
+pd3e <- pd2 %>%
+ # group_by(trt, day) %>%
+#  summarize(total = mean(total)) %>%
+#  ungroup() %>%
+  group_by(trt) %>%
+  summarize(mean = mean(total), sem= sd(total)/sqrt(dplyr::n())) %>%
+  ungroup()
+
+pd3e$abc2.x <- plyr::revalue(pd3e$trt, c("aceto 100g_aceto 25g" = "At","axenic 100g_axenic 25g" = "Ax","lacto 100g_lacto 25g" = "Lb"))
+
+pd3e$abc2.x <- factor(pd3e$abc2.x, levels = c("Ax","At","Lb"))
+
+plot_text_size = 3
+p25g100y <- ggplot(pd3e, aes( x=abc2.x, y = mean,fill = abc2.x)) +
+	geom_bar(stat="identity",size=plot_text_size*1) +
+  scale_color_manual(values = colors2) +
+	scale_fill_manual(name="Legend",values=colors2) +
+	scale_y_continuous(limits = c(0,750))+
+	theme_cowplot() +
+	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), legend.position = "none", axis.line = element_line(size = 0.2), axis.text = element_blank(), axis.ticks = element_blank()) +
+	geom_errorbar(col = "black", aes(ymax =mean+sem, ymin = mean-sem), width=0.25, size=.25) +
+#	geom_hline(yintercept = 0.5, linetype="dashed") +
+ 	geom_text(aes(label=c("a","a","b"), y=mean + sem + 80), size=plot_text_size)
+p25g100y
+#ggsave(h=2,w=3.5,"25G100Y.png")
+```
+
+### 75g100y
+```{r fig175g100y2, exercise=T, warning = F, message = F, eval = T, exercise.timelimit = 10000}
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%2075g100y%20+Date.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+abb <- read_xls(tf, sheet = "Date")
+aab <- read_xls(tf, sheet = "Date")
+ccc <- aaa
+
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+j=3
+for(i in 1:j) {
+	lacto_pref <- (ccc[,i]/(ccc[,(j+i)]+ccc[,i]))
+	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aaa[,i],aaa[,(j+i)])
+	lp3 <- lp2[(!is.na(lp2[,1]) & lp2[,1]!=-1),]
+	lp4 <- data.frame(lp3) %>% mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+j])), pref=lp3[,1], day=lp3[,2], time=lp3[,3],dieta=lp3[,4],dietb=lp3[,5]) %>% dplyr::select(trt,pref,day,dieta,dietb)
+	out_df <- rbind(out_df,lp4)
+}
+
+pref_data <- out_df %>% 
+	mutate(trt=gsub(pattern = " 10Y10G", replacement = "",x = trt,perl = T)) %>% 
+	mutate(trt=gsub(pattern = " 10Y7.5G", replacement = "",x = trt,perl = T)) %>%
+	mutate(trt=factor(trt)) %>%
+	filter(dieta<1000 & dietb<1000) %>%
+  mutate(total = dieta+dietb) %>%
+	droplevels()
+
+pd2 <- pref_data
+
+pd2$day2 <- as.factor(as.character(pd2$day))
+pd2$trt <- as.factor(as.character(pd2$trt))
+
+cat("KW test result")
+kruskal.test(pd2$total ~ pd2$trt)
+efg <- dunn.test(pd2$total, pd2$trt, method = "bh", table = F, kw=F)
+ghi <- cldList(comparison = efg$comparisons, p.value = efg$P.adjusted, threshold = 0.05)
+cat("compact letter displays")
+ghi
+
+pd3e <- pd2 %>%
+  group_by(trt) %>%
+  summarize(mean = mean(total), sem= sd(total)/sqrt(dplyr::n())) %>%
+  ungroup()
+
+cat("N per group")
+table(pd2$trt)
+
+pd3e$abc2.x <- plyr::revalue(pd3e$trt, c("aceto 100g_aceto 100" = "At","axenic 100g_axenic 100" = "Ax","lacto 100g_lacto 100" = "Lb"))
+
+pd3e$abc2.x <- factor(pd3e$abc2.x, levels = c("Ax","At","Lb"))
+
+plot_text_size = 3
+p100y75g <- ggplot(pd3e, aes( x=abc2.x, y = mean,fill = abc2.x)) +
+	geom_bar(stat="identity",size=plot_text_size*1) +
+  scale_color_manual(values = colors2) +
+	scale_fill_manual(name="Legend",values=colors2) +
+	scale_y_continuous(limits = c(0,750))+
+	theme_cowplot() +
+	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), legend.position = "none", axis.line = element_line(size = 0.2), axis.text = element_blank(), axis.ticks = element_blank()) +
+	geom_errorbar(col = "black", aes(ymax =mean+sem, ymin = mean-sem), width=0.25, size=.25) +
+#	geom_hline(yintercept = 0.5, linetype="dashed") +
+ 	geom_text(aes(label=c("a","b","a"), y=mean + sem + 80), size=plot_text_size)
+p100y75g
+
+#ggsave(h=2,w=3.5,"100y75g.png")
+```
+
+### 100g50y
+```{r fig1100g50y2, exercise=T, warning = F, message = F, eval = T, exercise.timelimit = 10000}
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%20100g50y%20+Data.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+abb <- read_xls(tf, sheet = "Date")
+aab <- read_xls(tf, sheet = "Date")
+ccc <- aaa
+
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+j=3
+for(i in 1:j) {
+	lacto_pref <- (ccc[,i]/(ccc[,(j+i)]+ccc[,i]))
+	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aaa[,i],aaa[,(j+i)])
+	lp3 <- lp2[(!is.na(lp2[,1]) & lp2[,1]!=-1),]
+	lp4 <- data.frame(lp3) %>% mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+j])), pref=lp3[,1], day=lp3[,2], time=lp3[,3],dieta=lp3[,4],dietb=lp3[,5]) %>% dplyr::select(trt,pref,day,dieta,dietb)
+	out_df <- rbind(out_df,lp4)
+}
+
+pref_data <- out_df %>% 
+	mutate(trt=gsub(pattern = " 10Y10G", replacement = "",x = trt,perl = T)) %>% 
+	mutate(trt=gsub(pattern = " 10Y7.5G", replacement = "",x = trt,perl = T)) %>%
+	filter(dieta<1000 & dietb<1000) %>%
+  mutate(total = dieta+dietb) %>%
+	droplevels()
+
+pd2 <- pref_data
+
+pd2$day2 <- as.factor(as.character(pd2$day))
+pd2$trt <- as.factor(as.character(pd2$trt))
+
+cat("KW test result")
+kruskal.test(pd2$total ~ pd2$trt)
+efg <- dunn.test(pd2$total, pd2$trt, method = "bh", table = F, kw=F)
+ghi <- cldList(comparison = efg$comparisons, p.value = efg$P.adjusted, threshold = 0.05)
+cat("compact letter displays")
+ghi
+
+pd3e <- pd2 %>%
+  group_by(trt) %>%
+  summarize(mean = mean(total), sem= sd(total)/sqrt(dplyr::n())) %>%
+  ungroup()
+
+cat("N per group")
+table(pd2$trt)
+
+pd3e$abc2.x <- plyr::revalue(pd3e$trt, c("aceto control_aceto trial" = "At","axenic control_axenic trial" = "Ax","lacto control_lacto trial" = "Lb"))
+
+pd3e$abc2.x <- factor(pd3e$abc2.x, levels = c("Ax","At","Lb"))
+ pd3e
+plot_text_size = 3
+p100g50y <- ggplot(pd3e, aes( x=abc2.x, y = mean,fill = abc2.x)) +
+	geom_bar(stat="identity",size=plot_text_size*1) +
+  scale_color_manual(values = colors2) +
+	scale_fill_manual(name="Legend",values=colors2) +
+	scale_y_continuous(limits = c(0,750))+
+	theme_cowplot() +
+	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), legend.position = "none", axis.line = element_line(size = 0.2), axis.text = element_blank(), axis.ticks = element_blank()) +
+	geom_errorbar(col = "black", aes(ymax =mean+sem, ymin = mean-sem), width=0.25, size=.25) +
+#	geom_hline(yintercept = 0.5, linetype="dashed") +
+ 	geom_text(aes(label=c("a","b","a"), y=c(602+74+70, 264+52+80, 489+53+80)), size=plot_text_size)
+
+p100g50y
+#ggsave(h=2,w=3.5,"100G50Y.png")
+```
+
+### 100g25y
+```{r fig1100g25y2, exercise=T, warning = F, message = F, eval = T, exercise.timelimit = 10000}
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%20100g25y%20+Date.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+abb <- read_xls(tf, sheet = "Date")
+aab <- read_xls(tf, sheet = "Date")
+ccc <- aaa
+
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+j=3
+for(i in 1:j) {
+	lacto_pref <- (ccc[,i]/(ccc[,(j+i)]+ccc[,i]))
+	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aaa[,i],aaa[,(j+i)])
+	lp3 <- lp2[(!is.na(lp2[,1]) & lp2[,1]!=-1),]
+	lp4 <- data.frame(lp3) %>% mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+j])), pref=lp3[,1], day=lp3[,2], time=lp3[,3],dieta=lp3[,4],dietb=lp3[,5]) %>% dplyr::select(trt,pref,day,dieta,dietb)
+	out_df <- rbind(out_df,lp4)
+}
+
+pref_data <- out_df %>% 
+	mutate(trt=gsub(pattern = " 10Y10G", replacement = "",x = trt,perl = T)) %>% 
+	mutate(trt=gsub(pattern = " 10Y7.5G", replacement = "",x = trt,perl = T)) %>%
+	filter(dieta<1000 & dietb<1000) %>%
+  mutate(total = dieta+dietb) %>%
+	droplevels()
+
+pd2 <- pref_data
+
+pd2$day2 <- as.factor(as.character(pd2$day))
+pd2$trt <- as.factor(as.character(pd2$trt))
+
+cat("KW test result")
+kruskal.test(pd2$total ~ pd2$trt)
+efg <- dunn.test(pd2$total, pd2$trt, method = "bh", table = F, kw=F)
+
+pd3e <- pd2 %>%
+  group_by(trt) %>%
+  summarize(mean = mean(total), sem= sd(total)/sqrt(dplyr::n())) %>%
+  ungroup()
+
+cat("N per group")
+table(pd2$trt)
+
+pd3e$abc2.x <- plyr::revalue(pd3e$trt, c("aceto yeast100_aceto yeast25" = "At","axenic yeast100_axenic yeast25" = "Ax","lacto yeast100_lacto yeast25" = "Lb"))
+
+pd3e$abc2.x <- factor(pd3e$abc2.x, levels = c("Ax","At","Lb"))
+
+plot_text_size = 3
+p100g25y <- ggplot(pd3e, aes( x=abc2.x, y = mean,fill = abc2.x)) +
+	geom_bar(stat="identity",size=plot_text_size*1) +
+  scale_color_manual(values = colors2) +
+	scale_fill_manual(name="Legend",values=colors2) +
+	scale_y_continuous(limits = c(0,750))+
+	theme_cowplot() +
+	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), legend.position = "none", axis.line = element_line(size = 0.2), axis.text = element_blank(), axis.ticks = element_blank()) +
+	geom_errorbar(col = "black", aes(ymax =mean+sem, ymin = mean-sem), width=0.25, size=.25) +
+#	geom_hline(yintercept = 0.5, linetype="dashed") +
+ 	geom_text(aes(label=c("a","a","a"), y=mean + sem + 80), size=plot_text_size)
+
+p100g25y
+#ggsave(h=2,w=3.5,"100G25Y.png")
+
+```
+
+### 50g50y
+```{r fig150g50y2, exercise=T, warning = F, message = F, eval = T, exercise.timelimit = 10000}
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%20100g100y%20vs%2050g50y%20+Date_JMC.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+abb <- read_xls(tf, sheet = "Date")
+aab <- read_xls(tf, sheet = "Date")
+ccc <- aaa
+
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+j=3
+for(i in 1:j) {
+	lacto_pref <- (ccc[,i]/(ccc[,(j+i)]+ccc[,i]))
+	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aaa[,i],aaa[,(j+i)])
+	lp3 <- lp2[(!is.na(lp2[,1]) & lp2[,1]!=-1),]
+	lp4 <- data.frame(lp3) %>% mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+j])), pref=lp3[,1], day=lp3[,2], time=lp3[,3],dieta=lp3[,4],dietb=lp3[,5]) %>% dplyr::select(trt,pref,day,dieta,dietb)
+	out_df <- rbind(out_df,lp4)
+}
+
+pref_data <- out_df %>% 
+	mutate(trt=gsub(pattern = " 10Y10G", replacement = "",x = trt,perl = T)) %>% 
+	mutate(trt=gsub(pattern = " 10Y7.5G", replacement = "",x = trt,perl = T)) %>%
+	filter(dieta<1000 & dietb<1000) %>%
+  mutate(total = dieta+dietb) %>%
+	droplevels()
+
+pd2 <- pref_data
+
+pd2$day2 <- as.factor(as.character(pd2$day))
+pd2$trt <- as.factor(as.character(pd2$trt))
+cat("KW test result")
+kruskal.test(pd2$total ~ pd2$trt)
+
+pd3e <- pd2 %>%
+  group_by(trt) %>%
+  summarize(mean = mean(total), sem= sd(total)/sqrt(dplyr::n())) %>%
+  ungroup()
+
+cat("N per group")
+table(pd2$trt)
+
+pd3e$abc2.x <- plyr::revalue(pd3e$trt, c("aceto ratio100_aceto ratio50" = "At","axenic ratio100_axenic ratio50" = "Ax","lacto ratio100_lacto ratio50" = "Lb"))
+
+pd3e$abc2.x <- factor(pd3e$abc2.x, levels = c("Ax","At","Lb"))
+
+plot_text_size = 3
+p50g50y <- ggplot(pd3e, aes( x=abc2.x, y = mean,fill = abc2.x)) +
+	geom_bar(stat="identity",size=plot_text_size*1) +
+  scale_color_manual(values = colors2) +
+	scale_fill_manual(name="Legend",values=colors2) +
+	scale_y_continuous(limits = c(0,750))+
+	theme_cowplot() +
+	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), legend.position = "none", axis.line = element_line(size = 0.2), axis.text = element_blank(), axis.ticks = element_blank()) +
+	geom_errorbar(col = "black", aes(ymax =mean+sem, ymin = mean-sem), width=0.25, size=.25) +
+#	geom_hline(yintercept = 0.5, linetype="dashed") +
+ 	geom_text(aes(label=c("a","a","a"), y=mean + sem + 80), size=plot_text_size)
+
+p50g50y
+#ggsave(h=2,w=3.5,"50G50Y.png")
+```
+
+### 50g25y
+```{r fig150g25y2, exercise=T, warning = F, message = F, eval = T, exercise.timelimit = 10000}
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%20100.100%20to%2050.25+Date_JMC.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+abb <- read_xls(tf, sheet = "Date")
+aab <- read_xls(tf, sheet = "Date")
+ccc <- aaa
+
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+j=3
+for(i in 1:j) {
+	lacto_pref <- (ccc[,i]/(ccc[,(j+i)]+ccc[,i]))
+	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aaa[,i],aaa[,(j+i)])
+	lp3 <- lp2[(!is.na(lp2[,1]) & lp2[,1]!=-1),]
+	lp4 <- data.frame(lp3) %>% mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+j])), pref=lp3[,1], day=lp3[,2], time=lp3[,3],dieta=lp3[,4],dietb=lp3[,5]) %>% dplyr::select(trt,pref,day,dieta,dietb)
+	out_df <- rbind(out_df,lp4)
+}
+
+pref_data <- out_df %>% 
+	mutate(trt=gsub(pattern = " 10Y10G", replacement = "",x = trt,perl = T)) %>% 
+	mutate(trt=gsub(pattern = " 10Y7.5G", replacement = "",x = trt,perl = T)) %>%
+	filter(dieta<1000 & dietb<1000) %>%
+  mutate(total = dieta+dietb) %>%
+	droplevels()
+
+pd2 <- pref_data
+
+pd2$day2 <- as.factor(as.character(pd2$day))
+pd2$trt <- as.factor(as.character(pd2$trt))
+
+cat("KW test result")
+kruskal.test(pd2$total ~ pd2$trt)
+
+pd3e <- pd2 %>%
+  group_by(trt) %>%
+  summarize(mean = mean(total), sem= sd(total)/sqrt(dplyr::n())) %>%
+  ungroup()
+
+cat("N per group")
+table(pd2$trt)
+
+pd3e$abc2.x <- plyr::revalue(pd3e$trt, c("aceto 100to100_aceto 50to25" = "At","axenic 100to100_axenic 50to25" = "Ax","lacto 100to100_lacto 50to25" = "Lb"))
+
+pd3e$abc2.x <- factor(pd3e$abc2.x, levels = c("Ax","At","Lb"))
+
+plot_text_size = 3
+p50g25y <- ggplot(pd3e, aes( x=abc2.x, y = mean,fill = abc2.x)) +
+	geom_bar(stat="identity",size=plot_text_size*1) +
+  scale_color_manual(values = colors2) +
+	scale_fill_manual(name="Legend",values=colors2) +
+	scale_y_continuous(limits = c(0,750))+
+	theme_cowplot() +
+	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), legend.position = "none", axis.line = element_line(size = 0.2), axis.text = element_blank(), axis.ticks = element_blank()) +
+	geom_errorbar(col = "black", aes(ymax =mean+sem, ymin = mean-sem), width=0.25, size=.25) +
+#	geom_hline(yintercept = 0.5, linetype="dashed") +
+ 	geom_text(aes(label=c("a","a","a"), y=mean + sem + 80), size=plot_text_size)
+
+p50g25y
+#ggsave(h=2,w=3.5,"50G25Y.png")
+
+```
+
+### Build the plot
+```{r fig1plot2, exercise=F, warning = F, message = F, eval = F, exercise.timelimit = 10000}
+
+pyaxis <- ggplot(pd3e, aes(x = abc2.x, xend=abc2.x, y=c(rep(0.5,length(table(list(abc2.x))))), yend=mean, col = abc2.x)) + 
+  geom_blank() + 
+  theme_cowplot() + 
+  ylim(c(0,750)) + 
+  theme(axis.title = element_blank(), axis.line.x =element_blank(), axis.ticks.x=element_blank(), axis.text.x= element_blank(),axis.ticks.y = element_line(size = 0.2), axis.line.y = element_line(size = 0.2), axis.text.y = element_text(size = 6))
+
+pxaxis <- ggplot(pd3e, aes(x = abc2.x, xend=abc2.x, y=c(rep(0.5,length(table(list(abc2.x))))), yend=mean, col = abc2.x)) + 
+  geom_blank() + 
+  theme_cowplot() + 
+  ylim(c(0,750)) + 
+    theme(axis.title = element_blank(), axis.line.y =element_blank(), axis.ticks.y=element_blank(), axis.text.y= element_blank(),axis.ticks.x = element_line(size = 0.2), axis.line.x = element_line(size = 0.2), axis.text.x = element_text(angle = 45, hjust = 1, size = 6))
+
+label_size = 4
+l100g <- ggplot() + theme_void() + geom_text(aes(0,0,label = "100g"), size = label_size)
+l75g <- ggplot() + theme_void() + geom_text(aes(0,0,label = "75g"), size = label_size)
+l50g <- ggplot() + theme_void() + geom_text(aes(0,0,label = "50g"), size = label_size)
+l25g <- ggplot() + theme_void() + geom_text(aes(0,0,label = "25g"), size = label_size)
+l100y <- ggplot() + theme_void() + geom_text(aes(0,0,label = "100g"), size = label_size)
+l75y <- ggplot() + theme_void() + geom_text(aes(0,0,label = "75g"), size = label_size)
+l50y <- ggplot() + theme_void() + geom_text(aes(0,0,label = "50g"), size = label_size)
+l25y <- ggplot() + theme_void() + geom_text(aes(0,0,label = "25g"), size = label_size)
+ly <- ggplot() + theme_void() + geom_text(aes(0,0,label = "Yeast"), size = label_size*1.25, angle = 90)
+lg <- ggplot() + theme_void() + geom_text(aes(0,0,label = "Glucose"), size = label_size*1.25)
+ltrt <- ggplot() + theme_void() + geom_text(aes(0,0,label = "# of sips"), size = label_size*.75, angle = 90)
+lfp <- ggplot() + theme_void() + geom_text(aes(0,0,label = "Bacterial treatment"), size = label_size*.75)
+lcontrol <- ggplot() + theme_void() + geom_text(aes(0,0,label = "prefers control diet"), size = label_size*.75, angle = 90, color = "green")
+ltrial <- ggplot() + theme_void() + geom_text(aes(0,0,label = "prefers trial diet"), size = label_size*.75, angle = 90, color = "green")
+
+jpeg(h=4.5, w=6, "plot_all_totals_2021-01-14.jpg", units = "in", res = 300)
+  grid.arrange(	
+		l25g, l50g, l75g, l100g, ## 1,2,3,4
+		l25y,p50g25y,p100g25y,
+		l50y,p50g50y,p100g50y,
+		l75y,p75y100g,
+		l100y,p25g100y,p50g100y,p100y75g,p100g100y,
+		pxaxis,pyaxis,pxaxis,pyaxis,pxaxis,pyaxis,pxaxis,pyaxis, ## 20-25
+		lg, ly, ltrt, lfp, ## 26, 27, 28, 29
+#		lcontrol,ltrial,
+		widths = c(.3,.4,.2,.2,.05,1,1,1,1,.05),	
+		heights = c(.3,.4,1,1,1,1,.3,.2),	
+		layout_matrix=rbind(	
+		  c(NA,NA,NA,NA,NA,26,26,26,26,NA),
+			c(NA,NA,NA,NA,NA,1, 2, 3, 4, NA),		
+			c(27,5, 28,19,NA,NA,6, NA,7, NA),
+			c(27,8, 28,21,NA,NA,9, NA,10,NA),
+			c(27,11,28,23,NA,NA,NA,NA,12,NA),
+			c(27,13,28,25,NA,14,15,16,17,NA),
+			c(NA,NA,NA,NA,NA,18,20,22,24,NA),
+			c(NA,NA,NA,NA,NA,29,29,29,29,NA)
+			)
+		)
+dev.off()
+
+  getwd()
+```
+
+
+## Figure S2B sip duration {.tabset}
+```{r, warning = F, message = F, eval = T, exercise.timelimit = 10000}
+
+# plot 100g100y
+sd_100g100y <- calc_feeding_time_stats("http://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%20100.100%20vs%20100.00%20+Date.xls?raw=true")
+sd_100g100y
+
+# plot 75y100g
+sd_75y100g <- calc_feeding_time_stats("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%20100g75y%20+Date.xls?raw=true")
+sd_75y100g
+
+### 50g100y
+sd_50g100y <- calc_feeding_time_stats("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%2050g100y%20+Date.xls?raw=true")
+sd_50g100y
+
+### 25g100y
+sd_25g100y <- calc_feeding_time_stats("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%2025g100y%20+Date.xls?raw=true")
+sd_25g100y
+
+### 75g100y
+sd_100y75g <- calc_feeding_time_stats("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%2075g100y%20+Date.xls?raw=true")
+sd_100y75g
+
+### 100g50y
+sd_100g50y <- calc_feeding_time_stats("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%20100g50y%20+Data.xls?raw=true")
+sd_100g50y
+
+### 100g25y
+sd_100g25y <- calc_feeding_time_stats("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%20100g25y%20+Date.xls?raw=true")
+sd_100g25y
+
+### 50g50y
+sd_50g50y <- calc_feeding_time_stats("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%20100g100y%20vs%2050g50y%20+Date_JMC.xls?raw=true")
+sd_50g50y
+
+### 50g25y
+sd_50g25y <- calc_feeding_time_stats("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%20100.100%20to%2050.25+Date_JMC.xls?raw=true")
+sd_50g25y
+```
+
+### Build the plot
+```{r fig1plot3, exercise=F, warning = F, message = F, eval = F, exercise.timelimit = 10000}
+
+GET("http://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat%20100.100%20vs%20100.00%20+Date.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+abb <- read_xls(tf, sheet = "Date")
+aab <- read_xls(tf, sheet = "SipDurations")
+
+ccc <- aaa
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+
+  for(i in 1:j) {
+  	lacto_pref <- (ccc[,i]/(ccc[,(j+i)]+ccc[,i]))
+  	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aab[,(i+j)],aaa[,i],aaa[,(j+i)])
+  	lp3 <- lp2[(!is.na(lp2[,c(1)]) & lp2[,c(1)]!=-1 & !is.na(lp2[,c(3)]) & lp2[,c(3)]!=-1 & !is.na(lp2[,c(4)]) & lp2[,c(4)]!=-1),]
+  	lp4 <- data.frame(lp3) %>% mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+j])), pref=lp3[,1], day=lp3[,2], time1=lp3[,3], time2 =lp3[,4],dieta=lp3[,5], dietb = lp3[,6]) %>% dplyr::select(trt,pref,day,time = time1, dieta=time1, dietb=time2) 
+  	out_df <- rbind(out_df,lp4)
+  }
+  
+  pref_data <- out_df %>% 
+  	mutate(trt=gsub(pattern = " 10Y10G", replacement = "",x = trt,perl = T)) %>% 
+  	mutate(trt=gsub(pattern = " 10Y7.5G", replacement = "",x = trt,perl = T)) %>%
+  	mutate(trt=factor(trt)) %>%
+    mutate(total = dieta+dietb) %>%
+  	droplevels() %>%
+    reshape2::melt(measure.vars = c("dieta", "dietb"),variable.name = "time_consuming_diet")
+
+  pref_data$trt2 <- factor(pref_data$trt, labels = c("At","Ax","Lb"))
+  pref_data$trt2 <- factor(pref_data$trt2, levels = c("Ax","At","Lb"))
+  pref_data$tt <- with(pref_data, interaction(trt2, time_consuming_diet))
+  
+  pd3e <- pref_data %>%
+    group_by(tt) %>%
+    summarize(mean = mean(value), sem= sd(value)/sqrt(dplyr::n())) %>%
+    ungroup()
+  
+  colors2 <- c("gray","gray","red","red","blue","blue")
+  
+  pd3e$abc2.x <- plyr::revalue(pd3e$tt, c("Ax.dieta" = "Ax control","At.dieta" = "At control", "Lb.dieta" = "Lb control","Ax.dietb" = "Ax trial", "At.dietb" = "At trial", "Lb.dietb" = "Lb trial"))
+  pd3e$abc2.x <- factor(pd3e$abc2.x, levels = c("Ax control","Ax trial","At control", "At trial", "Lb control", "Lb trial"))
+
+pyaxis <- ggplot(pd3e, aes(x = abc2.x, xend=abc2.x, y=c(rep(0.5,length(table(list(abc2.x))))), yend=mean, col = abc2.x)) + 
+  geom_blank() + 
+  theme_cowplot() + 
+  ylim(c(0,0.3)) + 
+  theme(axis.title = element_blank(), axis.line.x =element_blank(), axis.ticks.x=element_blank(), axis.text.x= element_blank(),axis.ticks.y = element_line(size = 0.2), axis.line.y = element_line(size = 0.2), axis.text.y = element_text(size = 6))
+
+pxaxis <- ggplot(pd3e, aes(x = abc2.x, xend=abc2.x, y=c(rep(0.5,length(table(list(abc2.x))))), yend=mean, col = abc2.x)) + 
+  geom_blank() + 
+  theme_cowplot() + 
+  ylim(c(0,.3)) + 
+    theme(axis.title = element_blank(), axis.line.y =element_blank(), axis.ticks.y=element_blank(), axis.text.y= element_blank(),axis.ticks.x = element_line(size = 0.2), axis.line.x = element_line(size = 0.2), axis.text.x = element_text(angle = 45, hjust = 1, size = 6))
+
+label_size = 4
+l100g <- ggplot() + theme_void() + geom_text(aes(0,0,label = "100g"), size = label_size)
+l75g <- ggplot() + theme_void() + geom_text(aes(0,0,label = "75g"), size = label_size)
+l50g <- ggplot() + theme_void() + geom_text(aes(0,0,label = "50g"), size = label_size)
+l25g <- ggplot() + theme_void() + geom_text(aes(0,0,label = "25g"), size = label_size)
+l100y <- ggplot() + theme_void() + geom_text(aes(0,0,label = "100g"), size = label_size)
+l75y <- ggplot() + theme_void() + geom_text(aes(0,0,label = "75g"), size = label_size)
+l50y <- ggplot() + theme_void() + geom_text(aes(0,0,label = "50g"), size = label_size)
+l25y <- ggplot() + theme_void() + geom_text(aes(0,0,label = "25g"), size = label_size)
+ly <- ggplot() + theme_void() + geom_text(aes(0,0,label = "Yeast"), size = label_size*1.25, angle = 90)
+lg <- ggplot() + theme_void() + geom_text(aes(0,0,label = "Glucose"), size = label_size*1.25)
+ltrt <- ggplot() + theme_void() + geom_text(aes(0,0,label = "sip duration (s)"), size = label_size*.75, angle = 90)
+lfp <- ggplot() + theme_void() + geom_text(aes(0,0,label = "Bacterial treatment and diet choice"), size = label_size*.75)
+lcontrol <- ggplot() + theme_void() + geom_text(aes(0,0,label = ""), size = label_size*.75, angle = 90, color = "green")
+ltrial <- ggplot() + theme_void() + geom_text(aes(0,0,label = ""), size = label_size*.75, angle = 90, color = "green")
+
+jpeg(h=4.5, w=6, "plot_sip_durations_addfilter.jpg", units = "in", res = 300)
+  grid.arrange(	
+		l25g, l50g, l75g, l100g, ## 1,2,3,4
+		l25y,sd_50g25y,sd_100g25y,
+		l50y,sd_50g50y,sd_100g50y,
+		l75y,sd_75y100g,
+		l100y,sd_25g100y,sd_50g100y,sd_100y75g,sd_100g100y,
+		pxaxis,pyaxis,pxaxis,pyaxis,pxaxis,pyaxis,pxaxis,pyaxis, ## 20-25
+		lg, ly, ltrt, lfp, ## 26, 27, 28, 29
+#		lcontrol,ltrial,
+		widths = c(.3,.4,.2,.2,.05,1,1,1,1,.05),	
+		heights = c(.3,.4,1,1,1,1,.3,.2),	
+		layout_matrix=rbind(	
+		  c(NA,NA,NA,NA,NA,26,26,26,26,NA),
+			c(NA,NA,NA,NA,NA,1, 2, 3, 4, NA),		
+			c(27,5, 28,19,NA,NA,6, NA,7, NA),
+			c(27,8, 28,21,NA,NA,9, NA,10,NA),
+			c(27,11,28,23,NA,NA,NA,NA,12,NA),
+			c(27,13,28,25,NA,14,15,16,17,NA),
+			c(NA,NA,NA,NA,NA,18,20,22,24,NA),
+			c(NA,NA,NA,NA,NA,29,29,29,29,NA)
+			)
+		)
+dev.off()
+
+```
+
+## Figure 2 {.tabset}
+### Figure 2
+```{r Fig2, exercise=T, warning = F, message = F, eval = T, exercise.timelimit = 1000000,fig.height=10, fig.width=3.5}
+
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat-ByDay.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+abb <- read_xls(tf, sheet = "Per Day")
+
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat-ByDay-ByTime.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+aab <- read_xls(tf, sheet = "By Time")
+ccc <- aaa
+
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+i=1
+for(i in 1:41) {
+	lacto_pref <- (ccc[,i]/(ccc[,(41+i)]+ccc[,i]))
+	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aaa[,i],aaa[,(41+i)])
+	lp3 <- lp2[(!is.na(lp2[,1]) & lp2[,1]!=-1),]
+	lp4 <- data.frame(lp3) %>% 
+	  mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+41])), pref=lp3[,1], day=lp3[,2], time=lp3[,3],dieta=lp3[,4],dietb=lp3[,5]) %>% 
+	  dplyr::select(trt,pref,day,time,dieta,dietb)
+	out_df <- rbind(out_df,lp4)
+}
+
+pref_data <- out_df %>% 
+	mutate(trt=gsub(pattern = " 100g100y", replacement = "",x = trt,perl = T)) %>% 
+	mutate(trt=gsub(pattern = " 100g50y", replacement = "",x = trt,perl = T)) %>%
+	filter(!trt%in%c("disregard-111_disregard-111","disregard-68_disregard-68")) %>%
+	mutate(trt=factor(trt)) %>%
+	filter(!trt%in%c("axenic_axenic","67_67","25_25","48_48","32_32")) %>% 
+	droplevels()
+
+#write.csv(pref_data, "pref_data.csv")
+
+pd2 <- read.csv(url("https://raw.githubusercontent.com/johnchaston/TBCdietPref/master/files/lookup_code.csv")) %>% inner_join(pref_data, by=c("trt")) %>% filter(!is.na(time)) %>% droplevels()
+
+pd2$day2 <- as.factor(as.character(pd2$day))
+pd2$time2 <- as.factor(as.character(pd2$time))
+pd2$code <- as.factor(as.character(pd2$code))
+pd2$td <- paste0(pd2$time,pd2$day)
+
+abc <- glmer(cbind(dieta,dietb) ~ trt + (1|day2) + (1|time2), data=pd2, family="binomial")
+cat("Statistics summary")
+summary(abc)
+def <- summary(abc)
+  # Runs the stats, pounded out to prevent timeout
+# abc1 <- glht(abc, mcp(trt='Tukey'))
+# abc2 <- cld(abc1)
+# efg <- data.frame(cbind(abc2$lp, abc2$x,abc2$xname ))
+#pd3e <- data.frame(abc2$lp, abc2$x) %>% group_by(abc2.x) %>% dplyr::summarize(mean = mean(abc2.lp), sem=sd(abc2.lp)/sqrt(sum(abc2.lp<2)))
+#write.csv(pd3e, 'fig2-pd3e.csv')
+#letters_orderA <- data.frame(abc2$mcletters$Letters) %>% tibble::rownames_to_column('name')
+#write.csv(letters_orderA, "letters_orderA.csv")
+
+efg <- read.csv(url('https://raw.githubusercontent.com/johnchaston/TBCdietPref/master/files/fig2-efg.csv'))
+fgh <- efg %>% group_by(X2) %>% dplyr::summarize(mean = mean(X1), sem = sd(X1)/sqrt(sum(X1>-1)))
+pd3e <- read.csv(url('https://raw.githubusercontent.com/johnchaston/TBCdietPref/master/files/fig2-pd3e.csv'))
+letters_orderA <- read.csv(url("https://raw.githubusercontent.com/johnchaston/TBCdietPref/master/files/letters_orderA.csv"))
+
+colors2 <- c("gray")
+
+pd3e$abc2.x <- factor(pd3e$abc2.x, levels = c("1_1","11cb6_11cb6","11cb7_11cb7","11ct2_11ct2","13_13","137_137","15_15","16_16","181_181","196_196","1ab7_1ab7","28_28","29_29","3_3","30_30","31_31","34_34","35_35","39_39","4_4","43_43","45_45","5_5","52_52","56_56","6_6","66_66","69_69","70_70","73_73","75_75","98_98"))
+
+efg2 <- efg %>% mutate(X2 = as.character(X2)) %>% full_join(read.csv(url("https://raw.githubusercontent.com/johnchaston/TBCdietPref/master/files/lookup_code.csv")), by = c("X2" = "singlecode"))
+
+pd3e$abc2.x <- plyr::revalue(pd3e$abc2.x, c("1_1" = "lbrc",
+                                            "11cb6_11cb6" = "wp07",
+                                            "11cb7_11cb7" = "wp13",
+                                            "11ct2_11ct2"="asl5",
+                                            "13_13"="bsub", 
+                                            "137_137" = "lc37", 
+                                            "15_15" = "ecok", 
+                                            "16_16" = "pput", 
+                                            "181_181" = "lpar", 
+                                            "196_196" = "llcs",
+                                            "1ab7_1ab7" = "wp18", 
+                                            "28_28" = "atrn",
+                                            "29_29" = "gfra", 
+                                            "3_3" = "lfrc",
+                                            "30_30" = "apan", 
+                                            "31_31" = "kmed",
+                                            "34_34" = "apnb",
+                                            "35_35" = "aace",
+                                            "39_39" = "apa3",
+                                            "4_4" = "apoc",
+                                            "43_43" = "aci5",
+                                            "45_45" = "aori",
+                                            "5_5" = "atrc",
+                                            "52_52" = "cint",
+                                            "56_56" = "galb",
+                                            "6_6" = "amac",
+                                            "66_66" = "lmli",
+                                            "69_69" = "lfal",
+                                            "70_70" = "lfrk",
+                                            "73_73" = "lbuc",
+                                            "75_75" = "lplw",
+                                            "98_98" = "lsui")
+                             )
+                             
+pd3e$abc2.x <- factor(pd3e$abc2.x, levels = rev(c("atrn","atrc","amac","aori","aci5","aace","apan","apa3","asl5","apnb","apoc","gfra","galb","kmed","cint","ecok","pput","lmli","lplw","lpar","lbrc","lbuc","lfrk","lfrc","llcs","wp07","wp13","wp18","lfal","lsui","lc37","bsub")))
+
+pd3e <- pd3e %>% arrange(abc2.x)
+
+letters_orderA$name2 <- plyr::revalue(letters_orderA$name, c("1_1" = "lbrc",
+                                                             "11cb6_11cb6" = "wp07", 
+                                                             "11cb7_11cb7" = "wp13",
+                                                             "11ct2_11ct2"="asl5", 
+                                                             "13_13"="bsub", 
+                                                             "137_137" = "lc37", 
+                                                             "15_15" = "ecok", 
+                                                             "16_16" = "pput", 
+                                                             "181_181" = "lpar", 
+                                                             "196_196" = "llcs",
+                                                             "1ab7_1ab7" = "wp18", 
+                                                             "28_28" = "atrn",
+                                                             "29_29" = "gfra", 
+                                                             "3_3" = "lfrc",
+                                                             "30_30" = "apan", 
+                                                             "31_31" = "kmed",
+                                                             "34_34" = "apnb",
+                                                             "35_35" = "aace",
+                                                             "39_39" = "apa3",
+                                                             "4_4" = "apoc",
+                                                             "43_43" = "aci5",
+                                                             "45_45" = "aori",
+                                                             "5_5" = "atrc",
+                                                             "52_52" = "cint",
+                                                             "56_56" = "galb",
+                                                             "6_6" = "amac",
+                                                             "66_66" = "lmli",
+                                                             "69_69" = "lfal",
+                                                             "70_70" = "lfrk",
+                                                             "73_73" = "lbuc",
+                                                             "75_75" = "lplw",
+                                                             "98_98" = "lsui"
+                                                             )
+                                      )
+letters_orderA$name2 <- factor(letters_orderA$name2, levels = rev(c("atrn","atrc","amac","aori","aci5","aace","apan","apa3","asl5","apnb","apoc","gfra","galb","kmed","cint","ecok","pput","lmli","lplw","lpar","lbrc","lbuc","lfrk","lfrc","llcs","wp07","wp13","wp18","lfal","lsui","lc37","bsub")))
+
+letters_order <- letters_orderA %>% arrange(name2) %>% dplyr::select(abc2.mcletters.Letters) %>% unlist() %>% unname()
+
+colors2 <- rev(c(rep("red",11),rep("orange",4),rep("green",2),rep("blue", 7),rep("purple",7),rep("purple4",1)))
+
+	ggplot(pd3e, aes(x = abc2.x, xend=abc2.x, y=c(rep(0.5,length(table(list(droplevels(pd3e$abc2.x)))))), yend=mean)) + 
+		geom_segment(stat="identity",size=12, col=colors2) + 
+		scale_fill_manual(name="Legend",values=colors2) +
+		scale_y_continuous(limits = c(0,1))+
+		theme_cowplot() + 
+		theme(axis.text.x = element_text(angle = 45, hjust=1), axis.text.y = element_text(hjust=0)) + # text = element_text(size=32), axis.text = element_text(size=32), 
+		geom_errorbar(aes(ymax =mean+sem, ymin = mean-sem), width=0.25, size=2) +
+		labs(x="",y = "Preference index") + 
+	  geom_text(x= 0, y= 0.02, label = "5%Y 10%G",color="green1",  hjust = -.1, angle = 90) +# size = 12
+	  geom_text(x= 0, y= 1, label = "10%Y 10%G",color="blue", hjust =-.1, angle = 90) + #size = 12
+		geom_hline(yintercept = 0.5, linetype="dashed") +
+	 	geom_text(aes(label=unlist(unname(letters_order)), y=.75)) + # , size=9
+	  coord_flip()
+
+	#ggsave(h=16,w=7,"MGWA_data.png")
+
+
+```
+
+### Figure S3A total feeding
+```{r FigS3A, exercise=T, warning = F, message = F, eval = T, exercise.timelimit = 1000000,fig.height=10, fig.width=3.5}
+
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat-ByDay.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+abb <- read_xls(tf, sheet = "Per Day")
+
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat-ByDay-ByTime.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+aab <- read_xls(tf, sheet = "By Time")
+ccc <- aaa
+
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+i=1
+for(i in 1:41) {
+	lacto_pref <- (ccc[,i]/(ccc[,(41+i)]+ccc[,i]))
+	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aaa[,i],aaa[,(41+i)])
+	lp3 <- lp2[(!is.na(lp2[,1]) & lp2[,1]!=-1),]
+	lp4 <- data.frame(lp3) %>% 
+	  mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+41])), pref=lp3[,1], day=lp3[,2], time=lp3[,3],dieta=lp3[,4],dietb=lp3[,5]) %>% 
+	  dplyr::select(trt,pref,day,time,dieta,dietb)
+	out_df <- rbind(out_df,lp4)
+}
+
+pref_data <- out_df %>% 
+	mutate(trt=gsub(pattern = " 100g100y", replacement = "",x = trt,perl = T)) %>% 
+	mutate(trt=gsub(pattern = " 100g50y", replacement = "",x = trt,perl = T)) %>%
+	filter(!trt%in%c("disregard-111_disregard-111","disregard-68_disregard-68")) %>%
+	mutate(trt=factor(trt)) %>%
+	filter(!trt%in%c("axenic_axenic","67_67","25_25","48_48","32_32")) %>% 
+  mutate(total = dieta + dietb) %>%
+	droplevels()
+
+#write.csv(pref_data, "pref_data.csv")
+
+pd2 <- read.csv(url("https://raw.githubusercontent.com/johnchaston/TBCdietPref/master/files/lookup_code.csv")) %>% inner_join(pref_data, by=c("trt")) %>% filter(!is.na(time)) %>% droplevels()
+
+pd2$day2 <- as.factor(as.character(pd2$day))
+pd2$time2 <- as.factor(as.character(pd2$time))
+pd2$code <- as.factor(as.character(pd2$code))
+pd2$td <- paste0(pd2$time,pd2$day)
+pd2$trt <- as.factor(as.character(pd2$trt))
+
+cat("KW test results")
+kruskal.test(pd2$total ~ pd2$trt)
+
+cat("N per group")
+table(pd2$trt)
+
+pd3e <- pd2 %>%
+  group_by(trt) %>%
+  summarize(mean = mean(total), sem= sd(total)/sqrt(dplyr::n())) %>%
+  ungroup()
+
+pd3e$abc2.x <- factor(pd3e$trt, levels = c("1_1","11cb6_11cb6","11cb7_11cb7","11ct2_11ct2","13_13","137_137","15_15","16_16","181_181","196_196","1ab7_1ab7","28_28","29_29","3_3","30_30","31_31","34_34","35_35","39_39","4_4","43_43","45_45","5_5","52_52","56_56","6_6","66_66","69_69","70_70","73_73","75_75","98_98"))
+
+pd3e$abc2.x <- plyr::revalue(pd3e$abc2.x, c("1_1" = "lbrc",
+                                            "11cb6_11cb6" = "wp07",
+                                            "11cb7_11cb7" = "wp13",
+                                            "11ct2_11ct2"="asl5",
+                                            "13_13"="bsub", 
+                                            "137_137" = "lc37", 
+                                            "15_15" = "ecok", 
+                                            "16_16" = "pput", 
+                                            "181_181" = "lpar", 
+                                            "196_196" = "llcs",
+                                            "1ab7_1ab7" = "wp18", 
+                                            "28_28" = "atrn",
+                                            "29_29" = "gfra", 
+                                            "3_3" = "lfrc",
+                                            "30_30" = "apan", 
+                                            "31_31" = "kmed",
+                                            "34_34" = "apnb",
+                                            "35_35" = "aace",
+                                            "39_39" = "apa3",
+                                            "4_4" = "apoc",
+                                            "43_43" = "aci5",
+                                            "45_45" = "aori",
+                                            "5_5" = "atrc",
+                                            "52_52" = "cint",
+                                            "56_56" = "galb",
+                                            "6_6" = "amac",
+                                            "66_66" = "lmli",
+                                            "69_69" = "lfal",
+                                            "70_70" = "lfrk",
+                                            "73_73" = "lbuc",
+                                            "75_75" = "lplw",
+                                            "98_98" = "lsui")
+                             )
+                             
+pd3e$abc2.x <- factor(pd3e$abc2.x, levels = rev(c("atrn","atrc","amac","aori","aci5","aace","apan","apa3","asl5","apnb","apoc","gfra","galb","kmed","cint","ecok","pput","lmli","lplw","lpar","lbrc","lbuc","lfrk","lfrc","llcs","wp07","wp13","wp18","lfal","lsui","lc37","bsub")))
+
+pd3e <- pd3e %>% arrange(abc2.x)
+
+colors2 <- rev(c(rep("red",11),rep("orange",4),rep("green",2),rep("blue", 7),rep("purple",7),rep("purple4",1)))
+
+
+	ggplot(pd3e, aes(x = abc2.x, xend=abc2.x, y=c(rep(0.5,length(table(list(droplevels(pd3e$abc2.x)))))), yend=mean)) + 
+		geom_segment(stat="identity",size=12, col=colors2) + 
+		scale_fill_manual(name="Legend",values=colors2) +
+		scale_y_continuous(limits = c(0,400))+
+		theme_cowplot() + 
+		theme(axis.text.x = element_text(angle = 45, hjust=1), axis.text.y = element_text(hjust=0), text = element_text(size=32), axis.text = element_text(size=32)) +
+		geom_errorbar(aes(ymax =mean+sem, ymin = mean-sem), width=0.25, size=2) +
+		labs(x="bacterial strain (code)",y = "# of sips") + 
+#	  geom_text(x= 0, y= 0.02, label = "5%Y 10%G",color="green1",  hjust = -.1, angle = 90) +# size = 12
+#	  geom_text(x= 0, y= 1, label = "10%Y 10%G",color="blue", hjust =-.1, angle = 90) + #size = 12
+#		geom_hline(yintercept = 0.5, linetype="dashed") 
+#	 	geom_text(aes(label=unlist(unname(letters_order)), y=.75)) + # , size=9
+	  coord_flip()
+
+# ggsave(h=16,w=7,"MGWA_totalfeed.png")
+
+
+```
+
+### Figure S3B total sip duration
+```{r FigS3B, exercise=T, warning = F, message = F, eval = T, exercise.timelimit = 1000000,fig.height=10, fig.width=3.5}
+
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+aab <- read_xls(tf, sheet = "SipDurations")
+
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat-ByDay.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+abb <- read_xls(tf, sheet = "Per Day")
+
+ccc <- aaa
+
+j=41
+
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+
+ for(i in 1:j) {
+  	lacto_pref <- (ccc[,i]/(ccc[,(j+i)]+ccc[,i]))
+  	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aab[,(i+j)],aaa[,i],aaa[,(j+i)])
+  	lp3 <- lp2[(!is.na(lp2[,c(1)]) & lp2[,c(1)]!=-1 & !is.na(lp2[,c(3)]) & lp2[,c(3)]!=-1 & !is.na(lp2[,c(4)]) & lp2[,c(4)]!=-1),]
+  	lp4 <- data.frame(lp3) %>% mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+j])), pref=lp3[,1], day=lp3[,2], time1=lp3[,3], time2 =lp3[,4],dieta=lp3[,5], dietb = lp3[,6], ) %>% dplyr::select(trt,pref,day,time = time1, sip1=dieta, sip2 = dietb, dieta=time1, dietb=time2) 
+  	out_df <- rbind(out_df,lp4)
+  }
+  
+  pref_data <- out_df %>% 
+  	filter(sip1<1000 & sip2<1000) %>%
+  	filter(!trt%in%c("disregard-111 100g100y_disregard-111 100g50y","disregard-68 100g100y_disregard-68 100g50y","67 100g100y_67 100g50y","25 100g100y_25 100g50y","48 100g100y_48 100g50y","32 100g100y_32 100g50y","axenic 100g100y_axenic 100g50y","103 100g100y_103 100g50y","71 100g100y_71 100g50y")) %>%
+  	mutate(trt=gsub(pattern = " 10Y10G", replacement = "",x = trt,perl = T)) %>% 
+  	mutate(trt=gsub(pattern = " 10Y7.5G", replacement = "",x = trt,perl = T)) %>%
+  	mutate(trt=factor(trt)) %>%
+  #	filter(dieta<200 & dietb<200) %>%
+    mutate(total = dieta+dietb) %>%
+  	droplevels() %>%
+    reshape2::melt(measure.vars = c("dieta", "dietb"),variable.name = "time_consuming_diet")
+
+    pref_data$trt2 <- plyr::revalue(pref_data$trt, c("1 100g100y_1 100g50y" = "lbrc",
+                                            "11cb6 100g100y_11cb6 100g50y" = "wp07",
+                                            "11cb7 100g100y_11cb7 100g50y" = "wp13",
+                                            "11ct2 100g100y_11ct2 100g50y"="asl5",
+                                            "13 100g100y_13 100g50y"="bsub", 
+                                            "137 100g100y_137 100g50y" = "lc37", 
+                                            "15 100g100y_15 100g50y" = "ecok", 
+                                            "16 100g100y_16 100g50y" = "pput", 
+                                            "181 100g100y_181 100g50y" = "lpar", 
+                                            "196 100g100y_196 100g50y" = "llcs",
+                                            "1ab7 100g100y_1ab7 100g50y" = "wp18", 
+                                            "28 100g100y_28 100g50y" = "atrn",
+                                            "29 100g100y_29 100g50y" = "gfra", 
+                                            "3 100g100y_3 100g50y" = "lfrc",
+                                            "30 100g100y_30 100g50y" = "apan", 
+                                            "31 100g100y_31 100g50y" = "kmed",
+                                            "34 100g100y_34 100g50y" = "apnb",
+                                            "35 100g100y_35 100g50y" = "aace",
+                                            "39 100g100y_39 100g50y" = "apa3",
+                                            "4 100g100y_4 100g50y" = "apoc",
+                                            "43 100g100y_43 100g50y" = "aci5",
+                                            "45 100g100y_45 100g50y" = "aori",
+                                            "5 100g100y_5 100g50y" = "atrc",
+                                            "52 100g100y_52 100g50y" = "cint",
+                                            "56 100g100y_56 100g50y" = "galb",
+                                            "6 100g100y_6 100g50y" = "amac",
+                                            "66 100g100y_66 100g50y" = "lmli",
+                                            "69 100g100y_69 100g50y" = "lfal",
+                                            "70 100g100y_70 100g50y" = "lfrk",
+                                            "73 100g100y_73 100g50y" = "lbuc",
+                                            "75 100g100y_75 100g50y" = "lplw",
+                                            "98 100g100y_98 100g50y" = "lsui")
+                             )
+                             
+pref_data$trt2 <- factor(pref_data$trt2, levels = rev(c("atrn","atrc","amac","aori","aci5","aace","apan","apa3","asl5","apnb","apoc","gfra","galb","kmed","cint","ecok","pput","lmli","lplw","lpar","lbrc","lbuc","lfrk","lfrc","llcs","wp07","wp13","wp18","lfal","lsui","lc37","bsub")))
+
+  pref_data$tt <- with(pref_data, interaction(trt2, time_consuming_diet))
+  
+  cat("KW test results")
+kwtest <- kruskal.test(pref_data$value ~ pref_data$tt)
+  
+  if (kwtest$p.value < 0.05) {
+    efg <- dunn.test(pref_data$value, pref_data$tt, method = "bh", table = F, kw=F)
+    ghi <- cldList(comparison = efg$comparisons, p.value = efg$P.adjusted, threshold = 0.05)
+    diff_codes <- as.character(unlist(ghi$Letter))
+  } else {
+    diff_codes <- c(rep("a",j*2))
+  }
+  
+cat("Compact letter displays")
+ghi
+  
+  pd3e <- pref_data %>%
+    group_by(tt) %>%
+    summarize(mean = mean(value), sem= sd(value)/sqrt(dplyr::n())) %>%
+    ungroup()
+
+  cat("N per group")  
+  table(pref_data$tt)
+
+  pd3e$tt <- gsub(pattern = "dieta", replacement = "C", x = pd3e$tt)
+  pd3e$tt <- gsub(pattern = "dietb", replacement = "T", x = pd3e$tt)
+  
+  pd3e$tt <- as.character(pd3e$tt)
+  pd3e$tt <- factor(pd3e$tt)  
+ 
+   pd3f <- pd3e %>% 
+    inner_join(ghi %>% mutate(tt = gsub(pattern = "dieta", replacement = "C", x = Group)) %>% mutate(tt = gsub(pattern = "dietb", replacement = "T", x = tt)) %>% mutate(tt = gsub(pattern = "wp7", replacement = "wp07", x = tt))) 
+
+  pd3f$tt <- factor(pd3f$tt, levels = (c("bsub.C","bsub.T","lc37.C","lc37.T","lsui.C","lsui.T","lfal.C","lfal.T","wp18.C","wp18.T","wp13.C","wp13.T","wp07.C","wp07.T","llcs.C","llcs.T","lfrc.C","lfrc.T","lfrk.C","lfrk.T","lbuc.C","lbuc.T","lbrc.C","lbrc.T","lpar.C","lpar.T","lplw.C","lplw.T","lmli.C","lmli.T","pput.C","pput.T","ecok.C","ecok.T","cint.C","cint.T","kmed.C","kmed.T","galb.C","galb.T","gfra.C","gfra.T","apoc.C","apoc.T","apnb.C","apnb.T","asl5.C","asl5.T","apa3.C","apa3.T","apan.C","apan.T","aace.C","aace.T","aci5.C","aci5.T","aori.C","aori.T","amac.C","amac.T","atrc.C","atrc.T","atrn.C","atrn.T")))
+  
+  plot_text_size = 3
+  
+    colors2 <- rev(c(rep(c("red","red", "pink","pink"),11/2),rep(c("orange","orange", "#FFCC66","#FFCC66"),2),rep(c("dark green","dark green", "light green","light green"),1),rep(c("blue","blue", "light blue","light blue"), 4),rep(c("purple","purple", "orchid1","orchid1"),8/2)))
+
+  all_sipduration_plot <- ggplot(pd3f, aes(x=tt, y = mean,fill = tt)) +
+  	geom_bar(stat="identity",size=plot_text_size*1) +
+    scale_color_manual(values = colors2) +
+  	scale_fill_manual(name="Legend",values=colors2) +
+  	scale_y_continuous(limits = c(0,.3))+
+  	theme_cowplot() +
+#  	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), legend.position = "none", axis.line = element_line(size = 0.2), axis.text = element_text(angle = 45), axis.ticks = element_blank()) +
+#  	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), legend.position = "none", axis.line = element_line(size = 0.4), axis.ticks = element_blank()) +
+		theme(axis.text.x = element_text(angle = 45, hjust=1), axis.text.y = element_text(hjust=0), text = element_text(size=32), axis.text = element_text(size=32),legend.position = "none") +
+
+  	geom_errorbar(col = "black", aes(ymax =mean+sem, ymin = mean-sem), width=.75, size=2) +
+  #	geom_hline(yintercept = 0.5, linetype="dashed") +
+ 	geom_text(aes(label=Letter, y=mean + sem + .04), size=plot_text_size*2) + 
+    coord_flip() + 
+    labs(y = "Sip duration (s)")
+  all_sipduration_plot
+
+	#ggsave(h=16,w=7,"MGWA_data-sipduration_addfilter.png")
+```
+
+
+### MGWA, including Fig S4 QQs
+```{r MGWA, exercise=T, warning = F, message = F, eval = T,  exercise.timelimit = 1000000}
+pd2 <- read.csv(url("https://raw.githubusercontent.com/johnchaston/TBCdietPref/master/files/lookup_code_mgwa2.csv")) %>% inner_join(read.csv(url("https://raw.githubusercontent.com/johnchaston/TBCdietPref/master/files/pref_data.csv")), by=c("trt")) %>% filter(!is.na(time)) %>% droplevels()
+
+pd2$day2 <- as.factor(as.character(pd2$day))
+pd2$time2 <- as.factor(as.character(pd2$time))
+pd2$code <- as.factor(as.character(pd2$code))
+pd2$td <- paste0(pd2$time,pd2$day)
+
+efg <- read.csv(url('https://raw.githubusercontent.com/johnchaston/TBCdietPref/master/files/fig2-efg.csv'))
+
+pd3 <- cbind(pd2, efg %>% dplyr::select(-X)) %>% mutate(testcol = paste0(trt, X2,code))
+
+parsed_data <- FormatAfterOrtho(url('https://raw.githubusercontent.com/johnchaston/TBCdietPref/master/files/groups2020.txt'), format="groups")
+
+# Unpound the single pounds to run code. pounded out now because it can be time  consuming, avoids long stalls on install. 
+
+# mcl_matrixC <- AnalyzeOrthoMCL(mcl_data = parsed_data, 
+# 						pheno_data = pd3,
+# 						 model = 'lmeR2ind',
+# 						 species_name = 'mgwa2',
+# 						 resp = 'X1',
+# 						 rndm1='day',
+# 						 rndm2='time',
+# 						 princ_coord = 0.5)
+# # Fig S4A
+# QQPlotter(mcl_matrixC)
+# # doesn't run to avoid specifying each individual folder path, but can download from github files folder and program the folder locally. Change the 'mgwa2/precompliantFasta3/' to the directory containing the compliant fasta files you download from github.
+# # joined_matrixC <- JoinRepSeq(parsed_data, 'mgwa2/precompliantfasta3/', mcl_matrixC, fastaformat = 'old')
+# # setwd('../..')
+# # WriteMCL(joined_matrixC,"lmeR2ind_binomialdata_1020.csv")
+
+# mcl_matrixB <- AnalyzeOrthoMCL(mcl_data = parsed_data, 
+# 						pheno_data = pd3,
+# 						 model = 'wx',
+# 						 species_name = 'mgwa2',
+# 						 resp = 'X1',
+# 						 princ_coord = 0.5)
+# 
+# # Fig S4B
+# QQPlotter(mcl_matrixB)
+# # doesn't run to avoid specifying each individual folder path, but can download from github files folder and program the folder locally. Change the 'mgwa2/precompliantFasta3/' to the directory containing the compliant fasta files you download from github.
+# #joined_matrixB <- JoinRepSeq(parsed_data, 'mgwa2/precompliantFasta3/', mcl_matrixB, fastaformat = 'old')
+# #setwd('../..')
+# # WriteMCL(joined_matrixB,"wilcox_binomial_10_20.csv")
+
+
+```
+
+
+## Figure 3
+### Figure 3
+```{r fig3, exercise=T, warning = F, message = F, eval = T, fig.width = 5, exercise.timelimit = 10000 }
+
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat-all%20together%20with%20dayandtime.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+bbb <- read_xls(tf, sheet = "SipDurations")
+abb <- read_xls(tf, sheet = "NumberOfSipsByDay")
+aab <- read_xls(tf, sheet = "NumberOfSipsByDay")
+ccc <- aaa
+
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+num_t=16
+for(i in 1:num_t) {
+	lacto_pref <- (ccc[,i]/(ccc[,(num_t+i)]+ccc[,i]))
+	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aaa[,i],aaa[,(num_t+i)])
+	lp3 <- lp2[(!is.na(lp2[,1]) & lp2[,1]!=-1),]
+	lp4 <- data.frame(lp3) %>% mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+num_t])), pref=lp3[,1], day=lp3[,2], time=lp3[,3],dieta=lp3[,4],dietb=lp3[,5]) %>% dplyr::select(trt,pref,day,dieta,dietb)
+	out_df <- rbind(out_df,lp4)
+}
+
+pd2 <- out_df %>% 
+	mutate(trt=gsub(pattern = " control", replacement = "",x = trt,perl = T)) %>% 
+	mutate(trt=gsub(pattern = " halfyeast", replacement = "",x = trt,perl = T)) %>%
+	filter(!trt%in%c("disregard-111_disregard-111","disregard-68_disregard-68")) %>%
+	mutate(trt=factor(trt)) %>%
+	filter(!trt%in%c("axenic_axenic","67_67","25_25","48_48","32_32")) %>%
+	filter(dieta<1000 & dietb<1000) %>%
+  filter(trt %in% c("T54_T54", "T03_T03", "T10_T10", "T14_T14", "T18_T18" ,"T19_T19", "T20_T20", "T23_T23", "T28_T28")) %>%
+	droplevels()
+
+pd2$day2 <- as.factor(as.character(pd2$day))
+pd2$trt <- as.factor(as.character(pd2$trt))
+
+pd2$trt <- factor(pd2$trt,levels=c( "T54_T54", "T03_T03", "T10_T10", "T14_T14", "T18_T18" ,"T19_T19", "T20_T20","T23_T23", "T28_T28"))
+
+abc <- glmer(cbind(dieta,dietb) ~ trt + (1|day2), data=pd2, family = "binomial")
+cat("Statistics summary")
+summary(abc)
+def <- summary(abc)
+abc3 <- glht(abc, mcp(trt='Dunnett'))
+cat("Dunnett test summary")
+summary(abc3)
+
+## creating plot
+abc1 <- glht(abc, mcp(trt='Tukey'))
+abc2 <- cld(abc1)
+efg <- data.frame(cbind(abc2$lp, abc2$x,abc2$xname)) %>% mutate(X1 = as.numeric(as.character(X1)))
+str(efg)
+fgh <- efg %>% group_by(X2) %>% dplyr::summarize(mean = mean(X1), sem = sd(X1)/sqrt(sum(X1>-1)))
+
+pd3e <- data.frame(abc2$lp, abc2$x) %>% group_by(abc2.x) %>% dplyr::summarize(mean = mean(abc2.lp), sem=sd(abc2.lp)/sqrt(sum(abc2.lp<2)))
+colors2 <- c("gray")
+
+pd3e$abc2.x <- factor(pd3e$abc2.x, levels = c("T54_T54" ,"T03_T03", "T10_T10", "T14_T14", "T18_T18" ,"T19_T19" ,"T20_T20", "T23_T23", "T28_T28"))
+pd3e$abc2.x <- plyr::revalue(pd3e$abc2.x, c("T54_T54" = "WT",
+                                            "T03_T03" = "NitT/TauT",# NS
+                                            "T10_T10" = "thiE",#***
+                                            "T14_T14" = "oprB",#***
+                                            "T18_T18" = "permease",#NS
+                                            "T19_T19" = "iscS",#***
+                                            "T20_T20" = "nuoA",#NS
+                                            "T23_T23" = "ALDH",#NS
+                                            "T28_T28" = "Hypothetical")# 
+                             )
+
+sigvals <- c("","","***","***","***","***","","","")
+
+ggplot(pd3e, aes(x = abc2.x, xend=abc2.x, y=c(rep(0.5,length(table(list(pd3e$abc2.x))))), yend=mean)) + 
+	geom_segment(stat="identity", size = 8,col="red") + #size=24, 
+	scale_fill_manual(name="Legend",values=colors2) +
+	scale_y_continuous(limits = c(0,1))+
+	theme_cowplot() + 
+	theme(axis.text.x = element_text(angle = 45, hjust=1)) +#text = element_text(size=32), axis.text = element_text(size=32), 
+	geom_errorbar(ymax =pd3e$mean+pd3e$sem, ymin = pd3e$mean-pd3e$sem, width=0.25, size=.75) +
+	labs(x="Bacterial mutant",y = "Preference index") + 
+  annotate(geom="label", x= 0, y= 0.02, label = "5%Y 10%G",color="green1",  hjust = 0, fill="white", label.size=0) +#size=12, 
+  annotate(geom="label", x= 0, y= 1, label = "10%Y 10%G",color="blue", hjust = 0, fill="white", label.size=0) + #size=12, 
+	geom_hline(yintercept = 0.5, linetype="dashed") +
+ 	geom_text(aes(label=sigvals, y=.6)) #, size=12
+
+x=.6
+#ggsave(h=5.17*x,w=6.64*x,"mutant_validation-2_27.png")
+
+```
+
+### Figure S5A feeding totals
+```{r figs5a, exercise=T, warning = F, message = F, eval = T, fig.width = 5, exercise.timelimit = 10000 }
+
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat-all%20together%20with%20dayandtime.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+bbb <- read_xls(tf, sheet = "SipDurations")
+abb <- read_xls(tf, sheet = "NumberOfSipsByDay")
+aab <- read_xls(tf, sheet = "NumberOfSipsByDay")
+ccc <- aaa
+
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+num_t=16
+for(i in 1:num_t) {
+	lacto_pref <- (ccc[,i]/(ccc[,(num_t+i)]+ccc[,i]))
+	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aaa[,i],aaa[,(num_t+i)])
+	lp3 <- lp2[(!is.na(lp2[,1]) & lp2[,1]!=-1),]
+	lp4 <- data.frame(lp3) %>% mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+num_t])), pref=lp3[,1], day=lp3[,2], time=lp3[,3],dieta=lp3[,4],dietb=lp3[,5]) %>% dplyr::select(trt,pref,day,dieta,dietb)
+	out_df <- rbind(out_df,lp4)
+}
+
+pd2 <- out_df %>% 
+	mutate(trt=gsub(pattern = " control", replacement = "",x = trt,perl = T)) %>% 
+	mutate(trt=gsub(pattern = " halfyeast", replacement = "",x = trt,perl = T)) %>%
+	filter(!trt%in%c("disregard-111_disregard-111","disregard-68_disregard-68")) %>%
+	mutate(trt=factor(trt)) %>%
+	filter(!trt%in%c("axenic_axenic","67_67","25_25","48_48","32_32")) %>%
+	filter(dieta<1000 & dietb<1000) %>%
+  filter(trt %in% c("T54_T54", "T03_T03", "T10_T10", "T14_T14", "T18_T18" ,"T19_T19", "T20_T20", "T23_T23", "T28_T28")) %>%
+  mutate(total = dieta+dietb) %>%
+	droplevels()
+
+pd2$day2 <- as.factor(as.character(pd2$day))
+pd2$trt <- as.factor(as.character(pd2$trt))
+
+pd2$trt <- factor(pd2$trt,levels=c( "T54_T54", "T03_T03", "T10_T10", "T14_T14", "T18_T18" ,"T19_T19", "T20_T20","T23_T23", "T28_T28"))
+
+cat("KW test")
+kruskal.test(pd2$total ~ pd2$trt)
+
+cat("N per group")
+table(pd2$trt)
+
+pd3e <- pd2 %>%
+  group_by(trt) %>%
+  summarize(mean = mean(total), sem= sd(total)/sqrt(dplyr::n())) %>%
+  ungroup()
+
+pd3e$abc2.x <- factor(pd3e$trt, levels = c("T54_T54" ,"T03_T03", "T10_T10", "T14_T14", "T18_T18" ,"T19_T19" ,"T20_T20", "T23_T23", "T28_T28"))
+
+pd3e$abc2.x <- plyr::revalue(pd3e$abc2.x, c("T54_T54" = "WT",
+                                            "T03_T03" = "NitT/TauT",# NS
+                                            "T10_T10" = "thiE",#***
+                                            "T14_T14" = "oprB",#***
+                                            "T18_T18" = "permease",#NS
+                                            "T19_T19" = "iscS",#***
+                                            "T20_T20" = "nuoA",#NS
+                                            "T23_T23" = "ALDH",#NS
+                                            "T28_T28" = "Hypothetical")# 
+                             )
+
+ggplot(pd3e, aes(x = abc2.x, xend=abc2.x, y=c(rep(0.5,length(table(list(pd3e$abc2.x))))), yend=mean)) + 
+	geom_segment(stat="identity", size = 8,col="red") + #size=24, 
+	scale_fill_manual(name="Legend",values=colors2) +
+	scale_y_continuous(limits = c(0,250))+
+	theme_cowplot() + 
+	theme(axis.text.x = element_text(angle = 45, hjust=1)) +#text = element_text(size=32), axis.text = element_text(size=32), 
+	geom_errorbar(aes(ymax =mean+sem, ymin = mean-sem), width=0.25, size=.75) +
+	labs(x="Bacterial mutant",y = "# of sips") 
+# 	geom_text(aes(label=sigvals, y=mean + sem + 20)) #, size=12
+
+x=.6
+#ggsave(h=5.17*x,w=6.64*x,"mutant_validation_totals-2_27.png")
+
+```
+
+## Figure S5B sip duration
+```{r figs5b, exercise=T, warning = F, message = F, eval = T, fig.width = 5, exercise.timelimit = 10000}
+
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/DataInExcelFormat-all%20together%20with%20dayandtime.xls?raw=true", write_disk(tf <- tempfile(fileext = ".xls")))
+
+aaa <- read_xls(tf, sheet = "NumberOfSips")
+abb <- read_xls(tf, sheet = "NumberOfSipsByDay")
+aab <- read_xls(tf, sheet = "SipDurations")[1:22,]
+ccc <- aaa
+j=16
+
+out_df <- data.frame(trt=character(), pref=numeric(),day=numeric(),time=numeric(),dieta=character(),dietb=character())
+
+ for(i in 1:j) {
+  	lacto_pref <- (ccc[,i]/(ccc[,(j+i)]+ccc[,i]))
+  	lp2 <- cbind(lacto_pref,abb[,(i)], aab[,i],aab[,(i+j)],aaa[,i],aaa[,(j+i)])
+  	lp3 <- lp2[(!is.na(lp2[,c(1)]) & lp2[,c(1)]!=-1 & !is.na(lp2[,c(3)]) & lp2[,c(3)]!=-1 & !is.na(lp2[,c(4)]) & lp2[,c(4)]!=-1),]
+  	lp4 <- data.frame(lp3) %>% mutate(trt=paste0(colnames(ccc[i]),"_",colnames(ccc[i+j])), pref=lp3[,1], day=lp3[,2], time1=lp3[,3], time2 =lp3[,4],dieta=lp3[,5], dietb = lp3[,6], ) %>% dplyr::select(trt,pref,day,time = time1, sip1=dieta, sip2 = dietb, dieta=time1, dietb=time2) 
+  	out_df <- rbind(out_df,lp4)
+  }
+ 
+pd2 <- out_df %>% 
+	droplevels()
+
+pref_data <- out_df %>% 
+	filter(sip1<1000 & sip2<1000) %>%
+	mutate(trt=gsub(pattern = " control", replacement = "",x = trt,perl = T)) %>% 
+	mutate(trt=gsub(pattern = " halfyeast", replacement = "",x = trt,perl = T)) %>%
+	mutate(trt=factor(trt)) %>%
+  filter(trt %in% c("T54_T54", "T03_T03", "T10_T10", "T14_T14", "T18_T18" ,"T19_T19", "T20_T20", "T23_T23", "T28_T28")) %>%
+  mutate(total = dieta+dietb) %>%
+ droplevels() %>%
+ reshape2::melt(measure.vars = c("dieta", "dietb"),variable.name = "time_consuming_diet")
+
+pref_data$trt2 <- factor(pref_data$trt, levels = rev(c("T54_T54" ,"T03_T03", "T10_T10", "T14_T14", "T18_T18" ,"T19_T19" ,"T20_T20", "T23_T23", "T28_T28")))
+
+pref_data$trt2 <- plyr::revalue(pref_data$trt2, c("T54_T54" = "WT",
+                                            "T03_T03" = "NitT/TauT",# NS
+                                            "T10_T10" = "thiE",#***
+                                            "T14_T14" = "oprB",#***
+                                            "T18_T18" = "permease",#NS
+                                            "T19_T19" = "iscS",#***
+                                            "T20_T20" = "nuoA",#NS
+                                            "T23_T23" = "ALDH",#NS
+                                            "T28_T28" = "Hypothetical")
+                         )
+                             
+
+  pref_data$tt <- with(pref_data, interaction(trt2, time_consuming_diet))
+
+  cat("KW test")
+  kwtest <- kruskal.test(pref_data$value ~ pref_data$tt)
+  print(kwtest)
+
+  if (kwtest$p.value < 0.05) {
+    efg <- dunn.test(pref_data$value, pref_data$tt, method = "bh", table = F, kw=F)
+    ghi <- cldList(comparison = efg$comparisons, p.value = efg$P.adjusted, threshold = 0.05)
+    diff_codes <- as.character(unlist(ghi$Letter))
+  } else {
+    diff_codes <- c(rep("a",j*2))
+  }
+   
+  cat("Compact letter displays")
+  ghi
+  
+  cat("N per group")
+  table(pref_data$tt)
+  
+  pd3e <- pref_data %>%
+    group_by(tt) %>%
+    summarize(mean = mean(value), sem= sd(value)/sqrt(dplyr::n())) %>%
+    ungroup()
+  
+  colors2 <- rev(c(rep(c("red","red", "pink","pink"),5)))
+  
+  pd3e$tt <- gsub(pattern = "dieta", replacement = "C", x = pd3e$tt)
+  pd3e$tt <- gsub(pattern = "dietb", replacement = "T", x = pd3e$tt)
+  
+  pd3e$tt <- as.character(pd3e$tt)
+  pd3e$tt <- factor(pd3e$tt)  
+ 
+   pd3f <- pd3e %>% 
+    inner_join(ghi %>% mutate(tt = gsub(pattern = "dieta", replacement = "C", x = Group)) %>% mutate(tt = gsub(pattern = "dietb", replacement = "T", x = tt)) %>% mutate(tt = gsub(pattern = "wp7", replacement = "wp07", x = tt))) 
+
+   pd3f$tt <- factor(pd3f$tt, levels = (c("WT.C","WT.T","NitT/TauT.C","NitT/TauT.T","thiE.C","thiE.T","oprB.C","oprB.T","permease.C","permease.T","iscS.C","iscS.T","nuoA.C","nuoA.T","ALDH.C","ALDH.T","Hypothetical.C","Hypothetical.T")))
+  
+  plot_text_size = 3
+  fig3_sipduration_plot <- ggplot(pd3f, aes(x=tt, y = mean,fill = tt)) +
+  	geom_bar(stat="identity",size=plot_text_size*1) +
+    scale_color_manual(values = colors2) +
+  	scale_fill_manual(name="Legend",values=colors2) +
+  	scale_y_continuous(limits = c(0,.3))+
+  	theme_cowplot() +
+#  	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), legend.position = "none", axis.line = element_line(size = 0.2), axis.text = element_text(angle = 45), axis.ticks = element_blank()) +
+#    	theme(text = element_text(size=plot_text_size), axis.title = element_blank(), legend.position = "none", axis.line = element_line(size = 0.2), axis.ticks = element_blank()) +
+    	theme(legend.position = "none", axis.ticks = element_blank()) +
+  	geom_errorbar(col = "black", aes(ymax =mean+sem, ymin = mean-sem), width=0.25, size=.375) +
+    	theme(axis.text.x = element_text(angle = 45, hjust=1)) +#text = element_text(size=32), axis.text = element_text(size=32), 
+  #	geom_hline(yintercept = 0.5, linetype="dashed") +
+ 	geom_text(aes(label=Letter, y=mean + sem + .015), size=plot_text_size) + 
+    labs(y = "Sip duration (s)", x = "Bacterial mutant")
+  fig3_sipduration_plot
+x=.6
+#ggsave(h=5.17*x,w=6.64*x,"fig3-sipduration_addfilter.png")
+
+```
+
+
+## Figure 4
+```{r dpf, exercise=T, warning = F, message = F, eval = T, exercise.timelimit = 10000}
+matching_file <- data.frame(plate = c("1","2","3","4","5","6","7","8"), type = c("dietandflies","flies","dietnoflies","flies","dietandflies","dietnoflies","flies","dietandflies"), day =c("4-7","4-7","4-8","4-8","4-8","4-10","4-10","4-10"))
+
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/Glucose_Protein_Values_JMC.xlsx?raw=true", write_disk(yg1 <- tempfile(fileext = ".xlsx")))
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/PlateA.xlsx?raw=true", write_disk(yg2 <- tempfile(fileext = ".xls")))
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/PlateB.xlsx?raw=true", write_disk(yg3 <- tempfile(fileext = ".xls")))
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/PlateC.xlsx?raw=true", write_disk(yg4 <- tempfile(fileext = ".xls")))
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/plate1.xlsx?raw=true", write_disk(yg5 <- tempfile(fileext = ".xls")))
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/plate2.xlsx?raw=true", write_disk(yg6 <- tempfile(fileext = ".xls")))
+GET("https://github.com/johnchaston/TBCdietPref/blob/master/files/plate3.xlsx?raw=true", write_disk(yg7 <- tempfile(fileext = ".xls")))
+
+
+pg_data <- combine_files(yg1,"Plate 1 Glucose","Plate A Protein",yg5,"Plate 1 - Sheet1", yg2,"Plate 1 - Sheet1") %>% 
+  rbind(combine_files(yg1,"Plate 2 Glucose","Plate B Protein",yg6,"Plate 2 - Sheet1", yg3,"Plate 1 - Sheet1")) %>%
+  rbind(combine_files(yg1,"Plate 3 Glucose","Plate C Protein",yg7,"Plate 3 - Sheet1", yg4,"Plate 1 - Sheet1")) %>% 
+	inner_join(matching_file, by = "plate")
+
+pg_data <- pg_data %>% 
+	mutate(normalized_glucose = glucose/(protein/2)) %>%
+	mutate(treatment = gsub(pattern = "WT",replacement = "54",x = treatment)) %>%
+  filter(treatment!=12) %>% 
+  droplevels()
+
+
+#write.csv(pg_data, 'pg_data.csv')
+## 
+# diet and flies
+## 
+dietandflies <- pg_data %>% filter(type == "dietandflies") %>% droplevels()
+
+## test if normal - normalized is not, so log-transform
+shapiro.test(dietandflies$normalized_glucose)
+shapiro.test(dietandflies$glucose)
+shapiro.test(dietandflies$protein)
+shapiro.test(log(dietandflies$normalized_glucose+1))
+
+dietandflies$treatment <- as.factor(dietandflies$treatment)
+def <- lmer(protein ~ treatment + (1|day), dietandflies)
+summary(def)
+efg <- glht(def, mcp(treatment = "Tukey"))
+fgh <- cld(efg)
+
+def <- lmer(glucose ~ treatment + (1|day), dietandflies)
+summary(def)
+efg <- glht(def, mcp(treatment = "Tukey"))
+fgh <- cld(efg)
+
+def <- lmer(log(normalized_glucose+1) ~ treatment + (1|day), dietandflies)
+summary(def)
+efg <- glht(def, mcp(treatment = "Tukey"))
+fgh <- cld(efg)
+
+df2 <- dietandflies %>% group_by(treatment) %>% summarize(mprot = mean(protein), sprot = sd(protein) / sqrt(dplyr::n()), mglu = mean(glucose), sglu = sd(glucose) / sqrt(dplyr::n()), mnglu = mean(normalized_glucose), snglu = sd(normalized_glucose) / sqrt(dplyr::n()))
+
+df2$treatment = factor(df2$treatment, levels = c(54, 14, 19, "X"))
+
+cat("Figure S2A")
+ggplot(df2, aes(x=treatment, y = mprot)) + 
+  geom_col() +
+  geom_errorbar(aes(ymax = mprot+sprot, ymin = mprot-sprot), position = position_dodge(width = 0.9), width = 0.5) + 
+  theme_cowplot() + 
+  scale_x_discrete(labels = c(expression(italic("A. fabarum")), expression(italic("oprB")), expression(italic("iscS")),expression("Axenic"))) +
+  geom_text(aes(y = (mprot+sprot)*1.05), label = c("a","ab","a","b"), size = 6) + 
+  labs(y = bquote(mu*"g protein sample"^-1))
+#ggsave("protein_plot.jpg", width = 4, height = 4)
+
+cat("Figure S2B")
+ggplot(df2, aes(x=treatment, y = mglu)) + 
+  geom_col() +
+  geom_errorbar(aes(ymax = mglu+sglu, ymin = mglu-sglu), position = position_dodge(width = 0.9), width = 0.5) + 
+  theme_cowplot() + 
+  scale_x_discrete(labels = c(expression(italic("A. fabarum")), expression(italic("oprB")), expression(italic("iscS")),expression("Axenic"))) +
+  geom_text(aes(y = (mglu+sglu)*1.05), label = c("a","a","a","a"), size = 6) + 
+  labs(y = bquote(mu*"g glucose sample"^-1))
+#ggsave("glucose_plot.jpg", width = 4, height = 4)  
+  
+cat("Figure 4A")
+ggplot(df2, aes(x=treatment, y = mnglu)) + 
+  geom_col() +
+  geom_errorbar(aes(ymax = mnglu+snglu, ymin = mnglu-snglu), position = position_dodge(width = 0.9), width = 0.5) + 
+  theme_cowplot() + 
+  scale_x_discrete(labels = c(expression(italic("A. fabarum")), expression(italic("oprB")), expression(italic("iscS")),expression("Axenic"))) +
+  geom_text(aes(y = (mnglu+snglu)*1.05), label = c("b","b","b","a"), size = 6) + 
+  labs(y = bquote(mu*"g glucose"~mu*"g protein"^-1))
+#ggsave("normalized_glucose.jpg", width = 4, height = 4)  
+
+##
+# Diet, no flies
+##
+
+dietnoflies <- pg_data %>% filter(type == "dietnoflies" & treatment != 12) %>% droplevels()
+
+## test if normal - protein is close enough, including considering multiple tests, that we assumed normality for all
+shapiro.test(dietnoflies$normalized_glucose)
+shapiro.test((dietnoflies$glucose))
+shapiro.test((dietnoflies$protein))
+
+dietnoflies$treatment <- as.factor(dietnoflies$treatment)
+def <- lm(protein ~ treatment, dietnoflies)
+summary(def)
+efg <- glht(def, mcp(treatment = "Tukey"))
+fgh <- cld(efg)
+
+def <- lm(glucose ~ treatment, dietnoflies)
+summary(def)
+efg <- glht(def, mcp(treatment = "Tukey"))
+fgh <- cld(efg)
+
+def <- lm(normalized_glucose ~ treatment, dietnoflies)
+summary(def)
+efg <- glht(def, mcp(treatment = "Tukey"))
+fgh <- cld(efg)
+
+df2 <- dietnoflies %>% group_by(treatment) %>% summarize(mprot = mean(protein), sprot = sd(protein) / sqrt(dplyr::n()), mglu = mean(glucose), sglu = sd(glucose) / sqrt(dplyr::n()), mnglu = mean(normalized_glucose), snglu = sd(normalized_glucose) / sqrt(dplyr::n()))
+
+df2$treatment = factor(df2$treatment, levels = c(54, 14, 19, "X"))
+
+cat("Figure S2C")
+ggplot(df2, aes(x=treatment, y = mprot)) + 
+  geom_col() +
+  geom_errorbar(aes(ymax = mprot+sprot, ymin = mprot-sprot), position = position_dodge(width = 0.9), width = 0.5) + 
+  theme_cowplot() + 
+  scale_x_discrete(labels = c(expression(italic("A. fabarum")), expression(italic("oprB")), expression(italic("iscS")),expression("Axenic"))) +
+  geom_text(aes(y = (mprot+sprot)*1.05), label = c("a","a","a","a"), size = 6) + 
+  labs(y = bquote(mu*"g protein sample"^-1))
+#ggsave("protein_plot_noflies.jpg", width = 4, height = 4)
+
+cat("Figure S2D")
+ggplot(df2, aes(x=treatment, y = mglu)) + 
+  geom_col() +
+  geom_errorbar(aes(ymax = mglu+sglu, ymin = mglu-sglu), position = position_dodge(width = 0.9), width = 0.5) + 
+  theme_cowplot() + 
+  scale_x_discrete(labels = c(expression(italic("A. fabarum")), expression(italic("oprB")), expression(italic("iscS")),expression("Axenic"))) +
+  geom_text(aes(y = (mglu+sglu)*1.05), label = c("ab","ab","b","a"), size = 6) + 
+  labs(y = bquote(mu*"g glucose sample"^-1))
+#ggsave("glucose_plot_noflies.jpg", width = 4, height = 4)  
+ 
+cat("Figure 4B") 
+ggplot(df2, aes(x=treatment, y = mnglu)) + 
+  geom_col() +
+  geom_errorbar(aes(ymax = mnglu+snglu, ymin = mnglu-snglu), position = position_dodge(width = 0.9), width = 0.5) + 
+  theme_cowplot() + 
+  scale_x_discrete(labels = c(expression(italic("A. fabarum")), expression(italic("oprB")), expression(italic("iscS")),expression("Axenic"))) +
+  geom_text(aes(y = (mnglu+snglu)*1.05), label = c("a","a","a","a"), size = 6) + 
+  labs(y = bquote(mu*"g glucose"~mu*"g protein"^-1))
+#ggsave("normalized_glucose_plot_noflies.jpg", width = 4, height = 4)  
+
+##
+# flies only
+##
+
+flies <- pg_data %>% filter(type == "flies" & treatment != 12) %>% droplevels()
+
+## test if normal - normalized is not normal and cannot be transformed normal, so use a Kruskal-Wallis test
+flies$normalized_glucose = flies$glucose_perfly / flies$protein_perfly
+shapiro.test(flies$normalized_glucose)
+shapiro.test(log10(flies$normalized_glucose+1))
+shapiro.test((flies$glucose_perfly))
+shapiro.test((flies$protein_perfly))
+
+flies$treatment <- as.factor(flies$treatment)
+def <- lm(protein_perfly ~ treatment, flies)
+summary(def)
+efg <- glht(def, mcp(treatment = "Tukey"))
+fgh <- cld(efg)
+
+def <- lm(glucose_perfly ~ treatment, flies)
+summary(def)
+efg <- glht(def, mcp(treatment = "Tukey"))
+fgh <- cld(efg)
+
+def <- kruskal.test(flies$normalized_glucose ~ as.factor(flies$treatment))
+efg <- dunn.test(flies$normalized_glucose,as.factor(flies$treatment), method = "bh", table = F)
+ghi <- cldList(comparison = efg$comparisons, p.value = efg$P.adjusted, threshold = 0.05)
+
+df2 <- flies %>% group_by(treatment) %>% summarize(mprot = mean(protein_perfly), sprot = sd(protein_perfly) / sqrt(dplyr::n()), mglu = mean(glucose_perfly), sglu = sd(glucose_perfly) / sqrt(dplyr::n()), mnglu = mean(normalized_glucose), snglu = sd(normalized_glucose) / sqrt(dplyr::n()))
+
+df2$treatment = factor(df2$treatment, levels = c(54, 14, 19, "X"))
+
+cat("Figure S2E")
+ggplot(df2, aes(x=treatment, y = mprot)) + 
+  geom_col() +
+  geom_errorbar(aes(ymax = mprot+sprot, ymin = mprot-sprot), position = position_dodge(width = 0.9), width = 0.5) + 
+  theme_cowplot() + 
+  scale_x_discrete(labels = c(expression(italic("A. fabarum")), expression(italic("oprB")), expression(italic("iscS")),expression("Axenic"))) +
+  geom_text(aes(y = (mprot+sprot)*1.05), label = c("a","a","a","a"), size = 6) + 
+  labs(y = bquote(mu*"g protein sample"^-1))
+#ggsave("protein_plot_flies.jpg", width = 4, height = 4)
+
+cat("Figure S2F")
+ggplot(df2, aes(x=treatment, y = mglu)) + 
+  geom_col() +
+  geom_errorbar(aes(ymax = mglu+sglu, ymin = mglu-sglu), position = position_dodge(width = 0.9), width = 0.5) + 
+  theme_cowplot() + 
+  scale_x_discrete(labels = c(expression(italic("A. fabarum")), expression(italic("oprB")), expression(italic("iscS")),expression("Axenic"))) +
+  geom_text(aes(y = (mglu+sglu)*1.05), label = c("ab","a","a","b"), size = 6) + 
+  labs(y = bquote(mu*"g glucose sample"^-1))
+#ggsave("glucose_plot_flies.jpg", width = 4, height = 4)  
+ 
+cat("Figure 4C")
+ggplot(df2, aes(x=treatment, y = mnglu)) + 
+  geom_col() +
+  geom_errorbar(aes(ymax = mnglu+snglu, ymin = mnglu-snglu), position = position_dodge(width = 0.9), width = 0.5) + 
+  theme_cowplot() + 
+  scale_x_discrete(labels = c(expression(italic("A. fabarum")), expression(italic("oprB")), expression(italic("iscS")),expression("Axenic"))) +
+  geom_text(aes(y = (mnglu+snglu)*1.05), label = c("a","a","a","b"), size = 6) + 
+  labs(y = bquote(mu*"g glucose"~mu*"g protein"^-1))
+#ggsave("normalized_glucose_plot_flies.jpg", width = 4, height = 4)  
+
+
+```
+
+
+## Figure S8
+```{r figs3, exercise=T, warning = F, message = F, eval = T, exercise.timelimit = 10000}
+
+## read in your file here, need to change the filepath
+traits <- read_xlsx('~/Dropbox/mec15344-sup-0002-DatasetsS1-S14.xlsx', sheet = "Dataset S7", skip = 2, na = "NA")
+  ## get pref data
+pd3e <- read.csv(url('https://raw.githubusercontent.com/johnchaston/TBCdietPref/master/files/fig2-pd3e.csv'))
+
+pd3e$abc2.x <- factor(pd3e$abc2.x, levels = c("1_1","11cb6_11cb6","11cb7_11cb7","11ct2_11ct2","13_13","137_137","15_15","16_16","181_181","196_196","1ab7_1ab7","28_28","29_29","3_3","30_30","31_31","34_34","35_35","39_39","4_4","43_43","45_45","5_5","52_52","56_56","6_6","66_66","69_69","70_70","73_73","75_75","98_98"))
+
+pd3e$abc2.x <- plyr::revalue(pd3e$abc2.x, c("1_1" = "lbrc",
+                                            "11cb6_11cb6" = "wp07",
+                                            "11cb7_11cb7" = "wp13",
+                                            "11ct2_11ct2"="asl5",
+                                            "13_13"="bsub", 
+                                            "137_137" = "lc37", 
+                                            "15_15" = "ecok", 
+                                            "16_16" = "pput", 
+                                            "181_181" = "lpar", 
+                                            "196_196" = "llcs",
+                                            "1ab7_1ab7" = "wp18", 
+                                            "28_28" = "atrn",
+                                            "29_29" = "gfra", 
+                                            "3_3" = "lfrc",
+                                            "30_30" = "apan", 
+                                            "31_31" = "gxyl",
+                                            "34_34" = "apnb",
+                                            "35_35" = "aace",
+                                            "39_39" = "apa3",
+                                            "4_4" = "apoc",
+                                            "43_43" = "aci5",
+                                            "45_45" = "aori",
+                                            "5_5" = "atrc",
+                                            "52_52" = "cint",
+                                            "56_56" = "galb",
+                                            "6_6" = "amac",
+                                            "66_66" = "lmli",
+                                            "69_69" = "lfal",
+                                            "70_70" = "lfrk",
+                                            "73_73" = "lbuc",
+                                            "75_75" = "lplw",
+                                            "98_98" = "lsui")
+                             )
+                             
+
+pd3e$abc2.x <- factor(pd3e$abc2.x, levels = rev(c("atrn","atrc","amac","aori","aci5","aace","apan","apa3","asl5","apnb","apoc","gfra","galb","gxyl","cint","ecok","pput","lmli","lplw","lpar","lbrc","lbuc","lfrk","lfrc","llcs","wp07","wp13","wp18","lfal","lsui","lc37","bsub")))
+
+pd3e <- pd3e %>% arrange(abc2.x)
+
+pd4 <- pd3e %>% inner_join(traits, by = c("abc2.x" = "treatment"))
+
+eee <- cor.test(pd4$mean,pd4$tgl_fly, method = "spearman")
+
+cat("Correlation test results")
+
+tgl <- ggplot(pd4, aes(x = mean, y = tgl_fly, color = color)) + 
+  geom_point(size = 2) +
+  scale_color_identity() +
+  stat_smooth(aes(group = 1), method = "lm", alpha = 0, formula = y ~ x, color = "black") + 
+  theme_cowplot() + 
+  labs(x = "DP index", y = bquote(mu*g~triacylglycerides~fly^-1)) +
+  annotate(y = 9, x=.2, geom="text", label=paste0("S = ",round(cor.test(pd4$mean,pd4$tgl_fly, method = "spearman")$statistic,2),"; df = ", cor.test(pd4$mean,pd4$tgl_fly)$parameter,"; p = ", round(cor.test(pd4$mean,pd4$tgl_fly, method = "spearman")$p.value,2)), size =4, hjust = 0)
+tgl
+
+starve <- ggplot(pd4, aes(x = mean, y = starve, color = color)) + 
+  geom_point(size = 2) +
+  scale_color_identity() +
+  stat_smooth(aes(group = 1), method = "lm", alpha = 0, formula = y ~ x, color = "black") + 
+  theme_cowplot() + 
+  labs(x = "DP index", y = "time (d)") + 
+    annotate(y = 2.75, x=.2, geom="text", label=paste0("S = ",round(cor.test(pd4$mean,pd4$starve, method = "spearman")$statistic,2),"; df = ", cor.test(pd4$mean,pd4$starve)$parameter,"; p = ", round(cor.test(pd4$mean,pd4$starve, method = "spearman")$p.value,2)), size = 4, hjust = 0)
+starve
+
+lifespan <- ggplot(pd4, aes(x = mean, y = lifespan, color = color)) + 
+  geom_point(size = 2) +
+  scale_color_identity() +
+  stat_smooth(aes(group = 1), method = "lm", alpha = 0, formula = y ~ x, color = "black") + 
+  theme_cowplot() + 
+  labs(x = "DP index", y = "time (d)")+ 
+    annotate(y = 38, x=.2, geom="text", label=paste0("S = ",round(cor.test(pd4$mean,pd4$lifespan, method = "spearman")$statistic,2),"; df = ", cor.test(pd4$mean,pd4$lifespan)$parameter,"; p = ", round(cor.test(pd4$mean,pd4$lifespan, method = "spearman")$p.value,2)), size = 4, hjust = 0)
+lifespan
+
+dev_time <- ggplot(pd4, aes(x = mean, y = dev_time, color = color)) + 
+  geom_point(size = 2) +
+  scale_color_identity() +
+  stat_smooth(aes(group = 1), method = "lm", alpha = 0, formula = y ~ x, color = "black") + 
+  theme_cowplot() + 
+  labs(x = "DP index", y = bquote(time~(d^-1)))+ 
+    annotate(y = .232, x=.2, geom="text", label=paste0("S = ",round(cor.test(pd4$mean,pd4$dev_time, method = "spearman")$statistic,2),"; df = ", cor.test(pd4$mean,pd4$dev_time)$parameter,"; p = ", round(cor.test(pd4$mean,pd4$dev_time, method = "spearman")$p.value,2)), size = 4, hjust = 0)
+dev_time
+
+fecundity <- ggplot(pd4, aes(x = mean, y = fecundity, color = color)) + 
+  geom_point(size = 2) +
+  scale_color_identity() +
+  stat_smooth(aes(group = 1), method = "lm", alpha = 0, formula = y ~ x, color = "black") + 
+  theme_cowplot() + 
+  labs(x = "DP index", y = bquote(offspring~hr-1))+ 
+    annotate(y =1, x=.2, geom="text", label=paste0("S = ",round(cor.test(pd4$mean,pd4$fecundity, method = "spearman")$statistic,2),"; df = ", cor.test(pd4$mean,pd4$fecundity)$parameter,"; p = ", round(cor.test(pd4$mean,pd4$fecundity, method = "spearman")$p.value,2)), size = 4, hjust = 0)
+fecundity
+
+feeding_rate <- ggplot(pd4, aes(x = mean, y = feeding_rate, color = color)) + 
+  geom_point(size = 2) +
+  scale_color_identity() +
+  stat_smooth(aes(group = 1), method = "lm", alpha = 0, formula = y ~ x, color = "black") + 
+  theme_cowplot() + 
+  labs(x = "DP index", y = bquote(mu*g~food~30~min^-1)) +
+    annotate(y = .16, x=.2, geom="text", label=paste0("S = ",round(cor.test(pd4$mean,pd4$feeding_rate, method = "spearman")$statistic,2),"; df = ", cor.test(pd4$mean,pd4$feeding_rate)$parameter,"; p = ", round(cor.test(pd4$mean,pd4$feeding_rate, method = "spearman")$p.value,2)), size = 4, hjust = 0)
+feeding_rate
+
+glucose <- ggplot(pd4, aes(x = mean, y = glucose, color = color)) + 
+  geom_point(size = 2) +
+  scale_color_identity() +
+  stat_smooth(aes(group = 1), method = "lm", alpha = 0, formula = y ~ x, color = "black") + 
+  theme_cowplot() + 
+  labs(x = "DP index", y = bquote(mu*g~glucose~fly^-1)) +
+    annotate(y = 11, x=.2, geom="text", label=paste0("S = ",round(cor.test(pd4$mean,pd4$glucose, method = "spearman")$statistic,2),"; df = ", cor.test(pd4$mean,pd4$glucose)$parameter,"; p = ", round(cor.test(pd4$mean,pd4$glucose, method = "spearman")$p.value,2)), size = 4, hjust = 0)
+glucose
+
+## Use to print to figure.
+# jpeg(h=9, w=9, "trait_plot.jpg", units = "in", res = 300)
+#   grid.arrange(	
+# 		tgl+labs(tag="A"), starve+labs(tag="B"), lifespan+labs(tag="C"),
+# 		dev_time+labs(tag="D"), fecundity+labs(tag="E"), feeding_rate+labs(tag="F"), ## 1,2,3,4
+# 		glucose+labs(tag="G"),
+# 		widths = c(3,3,3),	
+# 		heights = c(3,3,3),	
+# 		layout_matrix=rbind(	
+# 		  c(1,2,3),
+# 		  c(4,5,6),
+# 		  c(7,NA,NA)
+# 		  )
+# 		)
+# dev.off()
+
+```
+
